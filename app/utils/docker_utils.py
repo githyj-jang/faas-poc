@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 # 런타임 템플릿 경로
 RUNTIME_TEMPLATE_DIR = Path(__file__).parent.parent / "runtime"
 
-
 def build_callback_image(callback_id: int, code: str, runtime_type: str) -> str:
     tmp = tempfile.mkdtemp()
     runtime_dir = RUNTIME_TEMPLATE_DIR / runtime_type

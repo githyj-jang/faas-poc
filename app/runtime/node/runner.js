@@ -22,7 +22,8 @@ async function execute_lambda(event, context) {
         };
     }
 
-    console.log(JSON.stringify(response));
+    // console.log(JSON.stringify(response));
+    process.stdout.write(JSON.stringify(response));
 
     return response;
 }
