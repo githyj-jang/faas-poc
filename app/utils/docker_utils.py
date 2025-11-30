@@ -15,60 +15,6 @@ logger = logging.getLogger(__name__)
 # 런타임 템플릿 경로
 RUNTIME_TEMPLATE_DIR = Path(__file__).parent.parent / "runtime"
 
-# Async
-async def build_callback_image(callback_id: int, code: str, runtime_type: str, websocket) -> str:
-    tmp = tempfile.mkdtemp()
-
-    try:
-        runtime_dir = RUNTIME_TEMPLATE_DIR / runtime_type
-
-        if not runtime_dir.exists():
-            raise ValueError(f"Unknown runtime type: {runtime_type}")
-
-        entry_file = (
-            "lambda_function.py" if runtime_type == "python" else "lambda_function.js"
-        )
-        with open(Path(tmp) / entry_file, "w", encoding="utf-8") as f:
-            f.write(code)
-
-        for item in os.listdir(runtime_dir):
-            src = runtime_dir / item
-            dst = Path(tmp) / item
-            if src.is_dir():
-                shutil.copytree(str(src), str(dst), dirs_exist_ok=True)
-            else:
-                shutil.copy2(str(src), str(dst))
-
-        image_name = f"callback_{callback_id}".lower()
-
-        # async build with logs
-        process = await asyncio.create_subprocess_exec(
-            "docker", "build", "-t", image_name, tmp,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT
-        )
-
-        # stream logs
-        while True:
-            line = await process.stdout.readline()
-            if not line:
-                break
-            await websocket.send_text(line.decode().rstrip())
-
-        code = await process.wait()
-
-        if code != 0:
-            await websocket.send_text("Build failed ❌")
-            shutil.rmtree(tmp)
-            return {"status": "failed"}
-
-        await websocket.send_text("Build completed ✅")
-
-        shutil.rmtree(tmp)
-        return {"status": "success", "image": image_name}
-    finally:
-        shutil.rmtree(tmp)
-
 def run_callback_container(
     image_name: str, session_id: str, event_data: Dict[str, Any]
 ) -> Dict[str, Any]:
