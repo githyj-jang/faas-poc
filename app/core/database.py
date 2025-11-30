@@ -1,42 +1,48 @@
-import sqlite3
-from typing import Any, Dict, List, Optional, Tuple
+"""
+데이터베이스 설정 및 ORM 모델
 
-DB_PATH = "database.db"
+SQLAlchemy를 사용한 SQLite 데이터베이스 관리
+"""
 
-class SQLiteDB:
-    def __init__(self, db_path: str = DB_PATH):
-        self.db_path = db_path
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from pathlib import Path
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path, check_same_thread=False)
+# 데이터베이스 경로
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+DB_PATH = PROJECT_ROOT / "database.db"
+DATABASE_URL = f"sqlite:///{DB_PATH}"
 
-    def execute(
-        self,
-        query: str,
-        params: Tuple = (),
-        commit: bool = False,
-    ) -> None:
-        with self._connect() as conn:
-            cur = conn.cursor()
-            cur.execute(query, params)
-            if commit:
-                conn.commit()
+# SQLAlchemy 엔진 설정
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False},
+    echo=False,
+)
 
-    def fetch_one(
-        self, query: str, params: Tuple = ()
-    ) -> Optional[Tuple[Any, ...]]:
-        with self._connect() as conn:
-            cur = conn.cursor()
-            cur.execute(query, params)
-            return cur.fetchone()
+# 세션 팩토리
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-    def fetch_all(
-        self, query: str, params: Tuple = ()
-    ) -> List[Tuple[Any, ...]]:
-        with self._connect() as conn:
-            cur = conn.cursor()
-            cur.execute(query, params)
-            return cur.fetchall()
+# Base 모델
+Base = declarative_base()
 
 
-db = SQLiteDB()
+def get_db():
+    """
+    데이터베이스 세션 생성 제너레이터
+
+    FastAPI 의존성으로 사용됩니다.
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def init_db():
+    """
+    모든 테이블 생성
+    """
+    Base.metadata.create_all(bind=engine)
