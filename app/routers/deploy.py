@@ -18,39 +18,9 @@ callback_map = {}
 # 빌드 중인 콜백: {callback_id: image_name}
 building_callbacks = {}
 
-@router.post("/kube", response_model=dict)
-async def deploy_callback_kube(
-    req: CallbackDeployRequest,
-    db: Session = Depends(get_db),
-) -> dict:
-    """쿠버네티스에 콜백 배포"""
-    callback = CallbackRepository.get_callback_by_id(db, req.callback_id)
-    if not callback:
-        raise HTTPException(status_code=404, detail="Callback not found")
-
-    if req.status is False:
-        # undeploy
-        if callback.path in callback_map:
-            del callback_map[callback.path]
-        CallbackRepository.update_callback(db, req.callback_id, status="undeployed")
-        return {"message": "Callback undeployed", "path": callback.path}
-
-    # build
-    image_name = build_kube_callback_image(req.callback_id, callback.code, callback.type)
-
-    # callback
-    callback_map[callback.path] = image_name
-    CallbackRepository.update_callback(db, req.callback_id, status="deployed")
-
-    return {
-        "message": "Callback deployed",
-        "path": callback.path,
-        "image": image_name,
-    }
-
-
 @router.post("/", response_model=CallbackResponse)
 async def deploy_callback_docker(
+    container_type: str = "docker",
     req: CallbackDeployRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),

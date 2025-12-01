@@ -37,7 +37,8 @@ async def execute_callback(path_name: str, request: Request) -> dict:
     print(f"[K8s Logs - {pod_name}] {logs}")
 
     try:
-        result = json.loads(logs)
+        import json
+        result = json.loads(logs.replace("'", '"'))
     except Exception as e:
         result = {"error": "Invalid JSON in pod logs", "raw_logs": logs, "exception": str(e)}
 

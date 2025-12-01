@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
+from app.utils.kube_utils import build_kube_callback_image
 from app.models.lambda_model import LambdaStatusCode
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ async def build_callback_image_background(
     code: str,
     runtime_type: str,
     websocket=None,
+    container_type="docker"
 ) -> Dict[str, Any]:
     """
     백그라운드에서 콜백 이미지를 빌드합니다.
@@ -151,6 +153,13 @@ async def build_callback_image_background(
                 )
 
         code = await process.wait()
+
+        # Containered image transfer
+        if (container_type == "kube"):
+            await websocket.send_json(
+                {"type": "log", "message": "Transferring image to Kubernetes cluster..."}
+            )
+            await build_kube_callback_image(image_name)
 
         if code != 0:
             error_msg = "Build failed"
