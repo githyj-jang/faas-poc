@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -14,49 +15,24 @@ from app.models.lambda_model import LambdaStatusCode
 RUNTIME_TEMPLATE_DIR = Path(__file__).parent.parent / "runtime"
 LOCAL_REGISTRY = "localhost:5000"  # 로컬 레지스트리 주소
 
-def build_kube_callback_image(callback_id: int, code: str, runtime_type: str) -> str:
+async def build_kube_callback_image(image_name: str) -> str:
     """
     로컬 Docker 레지스트리를 사용하여 이미지 build & push 후
     Kubernetes에서 사용할 registry URL 반환
     """
-    # 1. 임시 빌드 디렉토리 생성
-    tmp = tempfile.mkdtemp()
-    runtime_dir = RUNTIME_TEMPLATE_DIR / runtime_type
+    # 1) docker save
+    process_save = await asyncio.create_subprocess_exec(
+        "docker", "save", "-o", f"{image_name}.tar", image_name,
+    )
 
-    if not runtime_dir.exists():
-        shutil.rmtree(tmp)
-        raise ValueError(f"Unknown runtime type: {runtime_type}")
+    await process_save.wait()
 
-    # 2. entry file 생성
-    entry_file = "lambda_function.py" if runtime_type == "python" else "lambda_function.js"
-    (Path(tmp) / entry_file).write_text(code, encoding="utf-8")
+    # 2) ctr import
+    process_import = await asyncio.create_subprocess_exec(
+        "sudo", "ctr", "-n", "k8s.io", "images", "import", f"{image_name}.tar",
+    )
 
-    # 3. runtime template 복사
-    for item in os.listdir(runtime_dir):
-        src = runtime_dir / item
-        dst = Path(tmp) / item
-        if src.is_dir():
-            shutil.copytree(src, dst, dirs_exist_ok=True)
-        else:
-            shutil.copy2(src, dst)
-
-    # 4. 이미지 이름
-    image_name = f"callback_{callback_id}:latest"
-    full_image_name = f"{LOCAL_REGISTRY}/callback_{callback_id}:latest"
-
-    # 5. Docker build
-    subprocess.run(["docker", "build", "-t", image_name, tmp], check=True)
-
-    # 6. 레지스트리 태그
-    subprocess.run(["docker", "tag", image_name, full_image_name], check=True)
-
-    # 7. 레지스트리에 push
-    subprocess.run(["docker", "push", full_image_name], check=True)
-
-    # 8. 임시 디렉토리 제거
-    shutil.rmtree(tmp)
-
-    return full_image_name
+    await process_import.wait()
 
 def run_lambda_job(image_name, session_id, event_data):
     config.load_kube_config()  # 로컬 kubeconfig 사용
