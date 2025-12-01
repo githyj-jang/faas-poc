@@ -6,7 +6,7 @@ from runner import execute_lambda
 SESSION_ID = os.environ.get("SESSION_ID")
 EVENT = os.environ.get("EVENT")
 
-event_obj = json.loads(EVENT)
+event_obj = json.loads(EVENT.replace("'", '"'))
 
 # Lambda
 result = execute_lambda(event_obj, {})

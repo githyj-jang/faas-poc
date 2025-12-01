@@ -50,7 +50,8 @@ def run_lambda_job(image_name, session_id, event_data):
                             name="lambda-container",
                             image=image_name,
                             env=[
-                                client.V1EnvVar(name="SESSION_ID", value="1234")
+                                client.V1EnvVar(name="SESSION_ID", value="1234"),
+                                client.V1EnvVar(name="EVENT", value=json.dumps(event_data))
                             ],
                             image_pull_policy="IfNotPresent"
                         )
