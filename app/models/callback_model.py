@@ -10,6 +10,7 @@ class CallbackDeployRequest(BaseModel):
     """콜백 배포 요청"""
     callback_id: int
     status: bool  # True: deploy, False: undeploy
+    c_type: str # kube, docker
 
 
 class CallbackRegisterRequest(BaseModel):

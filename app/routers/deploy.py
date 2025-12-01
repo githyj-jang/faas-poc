@@ -1,10 +1,11 @@
 import asyncio
-from fastapi import APIRouter, HTTPException, Depends, WebSocket, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, WebSocket, BackgroundTasks, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models.callback_model import CallbackDeployRequest, CallbackResponse
 from app.repositories.callback_repo import CallbackRepository
+from app.utils.broadcast_utils import connected_websockets
 from app.utils.docker_utils import (
     build_callback_image_background,
 )
@@ -20,7 +21,6 @@ building_callbacks = {}
 
 @router.post("/", response_model=CallbackResponse)
 async def deploy_callback_docker(
-    container_type: str = "docker",
     req: CallbackDeployRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -63,6 +63,7 @@ async def deploy_callback_docker(
         callback.path,
         callback.code,
         callback.type,
+        req.c_type,
         db,
     )
 
@@ -76,6 +77,7 @@ async def _build_and_register_callback(
     path: str,
     code: str,
     runtime_type: str,
+    c_type: str,
     db: Session,
 ) -> None:
     """
@@ -95,9 +97,10 @@ async def _build_and_register_callback(
         building_callbacks[callback_id] = image_name
 
         print("Building...")
+        
         # 빌드 실행
         result = await build_callback_image_background(
-            callback_id, code, runtime_type
+            callback_id, code, runtime_type, c_type
         )
         print("END")
 
@@ -124,48 +127,18 @@ async def _build_and_register_callback(
 # -------------------------
 #  WebSocket 방식 빌드 진행 상황 모니터링
 # -------------------------
-@router.websocket("/ws/deploy/{callback_id}")
-async def ws_deploy(websocket: WebSocket, callback_id: int):
-    """
-    WebSocket을 통해 빌드 진행 상황을 모니터링합니다.
-
-    Args:
-        websocket: WebSocket 연결
-        callback_id: 콜백 ID
-    """
+@router.websocket("/ws")
+async def ws_deploy(websocket: WebSocket):
     await websocket.accept()
+    connected_websockets.add(websocket)
 
     try:
-        if callback_id not in building_callbacks:
-            await websocket.send_json(
-                {
-                    "type": "error",
-                    "message": f"Callback {callback_id} is not being built",
-                }
-            )
-            await websocket.close()
-            return
-
-        await websocket.send_json(
-            {
-                "type": "info",
-                "message": f"Monitoring build for callback {callback_id}",
-            }
-        )
-
-        # 빌드가 완료될 때까지 대기
-        while callback_id in building_callbacks:
-            await asyncio.sleep(1)
-
-        await websocket.send_json(
-            {"type": "info", "message": "Build monitoring completed"}
-        )
-
-    except Exception as e:
-        print(f"WebSocket error: {str(e)}")
+        while True:
+            await websocket.receive_text()
+    except:
+        pass
     finally:
-        await websocket.close()
-
+        connected_websockets.remove(websocket)
 
 def get_callback_map() -> dict:
     """콜백 맵 반환"""
