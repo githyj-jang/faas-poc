@@ -18,17 +18,28 @@ async def execute_callback(path_name: str, request: Request) -> dict:
 
     image_name = callback_map[f"{path_name}"]
 
-    # Input event
-    event = (
-        await request.json()
-        if request.method == "POST"
-        else dict(request.query_params)
-    )
+    # 1. Query String 파싱
+    query_params = dict(request.query_params)
+    
+    # 2. Body 파싱 (POST일 때만)
+    body_data = {}
+    if request.method == "POST":
+        try:
+            body_data = await request.json()
+        except Exception:
+            body_data = {} # Body가 없거나 JSON이 아닌 경우
+
+    unified_event = {
+        "httpMethod": request.method,           # "GET" or "POST"
+        "queryStringParameters": query_params,  # 예: {"name": "foo"}
+        "body": body_data,                      # 예: {"id": 123}
+        "path": path_name
+    }
 
     session_id = str(uuid.uuid4())
-    print(f"Image: {image_name}, Session: {session_id}, Event: {event}")
+    print(f"Image: {image_name}, Session: {session_id}, Event: {unified_event}")
 
-    job_name = run_lambda_job(image_name=image_name, session_id=session_id, event_data=event)
+    job_name = run_lambda_job(image_name=image_name, session_id=session_id, event_data=unified_event)
     print(f"Started Job: {job_name}")
 
     pod_name = get_job_pod_name(job_name)

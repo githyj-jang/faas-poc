@@ -13,7 +13,7 @@ result = execute_lambda(event_obj, {})
 
 #print(f"[Lambda] SESSION_ID={SESSION_ID}, result={json.dumps(result, indent=2)}")
 
-print(f"{json.dumps(result)}")
+print(f"{json.dumps(result, ensure_ascii=False)}")
 
 '''
 file_path = "lambda_function.py"
