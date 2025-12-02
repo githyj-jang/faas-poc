@@ -2,7 +2,7 @@ from fastapi import FastAPI
 
 from app.core.database import init_db
 from app.routers import api, deploy, callback, chatroom
-
+from fastapi.middleware.cors import CORSMiddleware
 
 def create_app() -> FastAPI:
     """
@@ -18,6 +18,18 @@ def create_app() -> FastAPI:
         title="FaaS Gateway",
         description="Function as a Service Gateway API",
         version="1.0.0",
+    )
+
+    origins = [
+        "*"
+    ]
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True, 
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     # 라우터 등록

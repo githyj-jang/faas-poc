@@ -13,7 +13,7 @@ from app.utils.kube_utils import build_kube_callback_image
 
 router = APIRouter(prefix="/deploy", tags=["deploy"])
 
-# 콜백 맵: {path: image_name}
+# { "path": { "METHOD": "image_name" } }
 callback_map = {}
 
 # 빌드 중인 콜백: {callback_id: image_name}
@@ -48,8 +48,10 @@ async def deploy_callback_docker(
 
     if req.status is False:
         # undeploy
-        if callback.path in callback_map:
-            del callback_map[callback.path]
+        if callback.path in callback_map and callback.method in callback_map[callback.path]:
+            del callback_map[callback.path][callback.method]
+            if not callback_map[callback.path]:
+                del callback_map[callback.path]
         CallbackRepository.update_callback(db, req.callback_id, status="undeployed")
         return callback
 
@@ -61,8 +63,11 @@ async def deploy_callback_docker(
         _build_and_register_callback,
         callback.callback_id,
         callback.path,
+        callback.method,
         callback.code,
         callback.type,
+        callback.library,
+        callback.env,
         req.c_type,
         db,
     )
@@ -75,8 +80,11 @@ async def deploy_callback_docker(
 async def _build_and_register_callback(
     callback_id: int,
     path: str,
+    method: str,
     code: str,
     runtime_type: str,
+    lib: str,
+    env: str,
     c_type: str,
     db: Session,
 ) -> None:
@@ -100,14 +108,20 @@ async def _build_and_register_callback(
         
         # 빌드 실행
         result = await build_callback_image_background(
-            callback_id, code, runtime_type, c_type
+            callback_id, code, runtime_type, c_type, lib, env
         )
         print("END")
+        print(result)
 
         if result["status"] == "success":
             # 빌드 성공: 콜백 맵에 등록 및 상태 변경
             normalized_path = normalize_path(path)
-            callback_map[normalized_path] = result["image"]
+
+            if normalized_path not in callback_map:
+                callback_map[normalized_path] = {}
+            
+            callback_map[normalized_path][method] = result["image"]
+            
             CallbackRepository.update_callback(
                 db, callback_id, status="deployed"
             )

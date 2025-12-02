@@ -34,11 +34,34 @@ async def build_kube_callback_image(image_name: str) -> str:
 
     await process_import.wait()
 
-def run_lambda_job(image_name, session_id, event_data):
+def run_lambda_job(image_name, session_id, event_data, env_vars: Dict[str, str] = None):
+    """
+    Kubernetes에서 Lambda 작업을 실행합니다.
+
+    Args:
+        image_name: 이미지 이름
+        session_id: 세션 ID
+        event_data: 이벤트 데이터
+        env_vars: 환경변수 (선택사항)
+
+    Returns:
+        작업 이름
+    """
     config.load_kube_config()  # 로컬 kubeconfig 사용
 
     batch_v1 = client.BatchV1Api()
     job_name = f"lambda-job-{uuid.uuid4().hex[:8]}"
+
+    # 환경변수 준비
+    env_list = [
+        client.V1EnvVar(name="SESSION_ID", value=session_id),
+        client.V1EnvVar(name="EVENT", value=json.dumps(event_data))
+    ]
+    
+    # 추가 환경변수 있으면 추가
+    if env_vars:
+        for key, value in env_vars.items():
+            env_list.append(client.V1EnvVar(name=key, value=str(value)))
 
     job = client.V1Job(
         metadata=client.V1ObjectMeta(name=job_name),
@@ -49,10 +72,7 @@ def run_lambda_job(image_name, session_id, event_data):
                         client.V1Container(
                             name="lambda-container",
                             image=image_name,
-                            env=[
-                                client.V1EnvVar(name="SESSION_ID", value="1234"),
-                                client.V1EnvVar(name="EVENT", value=json.dumps(event_data))
-                            ],
+                            env=env_list,
                             image_pull_policy="IfNotPresent"
                         )
                     ],

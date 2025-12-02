@@ -4,7 +4,7 @@ ORM 모델 정의
 SQLAlchemy ORM 모델
 """
 
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, func
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, func, JSON
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -19,6 +19,8 @@ class CallbackInfo(Base):
     method = Column(String, nullable=False)
     type = Column(String, nullable=False)  # python, node 등
     code = Column(String, nullable=False)
+    library = Column(String, nullable=True)  # 라이브러리 (requirements.txt 또는 package.json 형식)
+    env = Column(JSON, nullable=True)  # 환경변수 (JSON 형식)
     status = Column(String, default="pending")  # pending, build, deployed, undeployed, failed
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 

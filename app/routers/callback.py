@@ -6,12 +6,14 @@
 
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
+from app.routers.deploy import get_callback_map
 
 from app.core.database import get_db
 from app.models.callback_model import (
     CallbackRegisterRequest,
     CallbackUpdateRequest,
     CallbackResponse,
+    CallbackAllResonse
 )
 from app.repositories.callback_repo import CallbackRepository
 
@@ -26,6 +28,7 @@ async def register_callback(
     새 콜백 등록 (같은 path가 있는지 체크)
     
     chat_id가 제공되면 해당 챗룸과 연결됩니다.
+    library와 env를 포함할 수 있습니다.
 
     Args:
         req: 콜백 등록 요청
@@ -45,17 +48,19 @@ async def register_callback(
             type=req.type,
             code=req.code,
             chat_id=req.chat_id,
+            library=req.library,
+            env=req.env,
         )
         return callback
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
 
-@router.get("/{callback_id}", response_model=CallbackResponse)
+@router.get("/{callback_id}", response_model=CallbackAllResonse)
 async def get_callback(
     callback_id: int,
     db: Session = Depends(get_db),
-) -> CallbackResponse:
+) -> CallbackAllResonse:
     """
     콜백 조회
 
@@ -99,6 +104,18 @@ async def update_callback(
         HTTPException: 콜백을 찾을 수 없거나 path가 중복되거나 챗룸을 찾을 수 없음
     """
     try:
+        origin_callback = CallbackRepository.get_callback_by_id(db, callback_id)
+        if not origin_callback:
+            raise HTTPException(status_code=404, detail="Callback not found")
+        
+        path = req.path if req.path is not None else origin_callback.path
+        method = req.method if req.method is not None else origin_callback.method
+
+        callback_map = get_callback_map()
+        if callback_map.get(path) and method in callback_map[path]:
+            if origin_callback.path != path or origin_callback.method != method:
+                raise ValueError(f"Callback with path '{path}' and method '{method}' already exists")
+
         # 업데이트할 데이터만 추출
         update_data = {}
         if req.path is not None:
@@ -111,6 +128,10 @@ async def update_callback(
             update_data["code"] = req.code
         if req.status is not None:
             update_data["status"] = req.status
+        if req.library is not None:
+            update_data["library"] = req.library
+        if req.env is not None:
+            update_data["env"] = req.env
 
         callback = CallbackRepository.update_callback(db, callback_id, **update_data)
         if not callback:
@@ -118,30 +139,6 @@ async def update_callback(
         return callback
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
-
-
-@router.get("/path/{path}", response_model=CallbackResponse)
-async def get_callback_by_path(
-    path: str,
-    db: Session = Depends(get_db),
-) -> CallbackResponse:
-    """
-    경로로 콜백 조회
-
-    Args:
-        path: 콜백 경로
-        db: 데이터베이스 세션
-
-    Returns:
-        콜백 정보
-
-    Raises:
-        HTTPException: 콜백을 찾을 수 없음
-    """
-    callback = CallbackRepository.get_callback_by_path(db, path)
-    if not callback:
-        raise HTTPException(status_code=404, detail="Callback not found")
-    return callback
 
 
 @router.get("/", response_model=list[CallbackResponse])
@@ -179,7 +176,20 @@ async def delete_callback(
     Raises:
         HTTPException: 콜백을 찾을 수 없음
     """
+    callback = CallbackRepository.get_callback_by_id(db, callback_id)
+    if not callback:
+        raise HTTPException(status_code=404, detail="Callback not found")
+    elif callback.status == "build":
+        raise HTTPException(status_code=400, detail="Cannot delete callback while it is building")
+
     success = CallbackRepository.delete_callback(db, callback_id)
+
+    callback_map = get_callback_map()
+    if callback.path in callback_map and callback.method in callback_map[callback.path]:
+        del callback_map[callback.path][callback.method]
+        if not callback_map[callback.path]:
+            del callback_map[callback.path]
+
     if not success:
         raise HTTPException(status_code=404, detail="Callback not found")
     return {"message": "Callback deleted successfully"}

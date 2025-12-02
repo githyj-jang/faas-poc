@@ -21,6 +21,8 @@ class CallbackRepository:
         type: str,
         code: str,
         chat_id: int = None,
+        library: str = None,
+        env: dict = None,
     ) -> CallbackInfo:
         """
         콜백 생성 (같은 path가 있는지 체크)
@@ -34,6 +36,8 @@ class CallbackRepository:
             type: 런타임 타입
             code: 콜백 코드
             chat_id: 연결할 챗룸 ID (선택사항)
+            library: 라이브러리 (requirements.txt 또는 package.json 형식)
+            env: 환경변수 (JSON 형식)
 
         Returns:
             생성된 콜백
@@ -43,8 +47,8 @@ class CallbackRepository:
         """
         # 같은 path가 있는지 체크
         existing = db.query(CallbackInfo).filter(CallbackInfo.path == path).first()
-        if existing:
-            raise ValueError(f"Callback with path '{path}' already exists")
+        if existing and existing.method == method:
+            raise ValueError(f"Callback with path '{path}' / '{method}' already exists")
 
         # chat_id가 제공되면 해당 챗룸 존재 여부 확인
         if chat_id is not None:
@@ -57,6 +61,8 @@ class CallbackRepository:
             method=method,
             type=type,
             code=code,
+            library=library,
+            env=env,
             status="pending",
         )
         db.add(callback)
@@ -88,7 +94,7 @@ class CallbackRepository:
         ).first()
 
     @staticmethod
-    def get_callback_by_path(db: Session, path: str) -> CallbackInfo:
+    def get_callback_by_path(db: Session, path: str, method: str) -> CallbackInfo:
         """
         경로로 콜백 조회
 
@@ -99,7 +105,7 @@ class CallbackRepository:
         Returns:
             콜백 정보
         """
-        return db.query(CallbackInfo).filter(CallbackInfo.path == path).first()
+        return db.query(CallbackInfo).filter(CallbackInfo.path == path and CallbackInfo.method == method).first()
 
     @staticmethod
     def get_all_callbacks(db: Session) -> list:
@@ -143,12 +149,21 @@ class CallbackRepository:
             return None
 
         # path가 변경되는 경우 중복 체크
-        if "path" in kwargs and kwargs["path"] != callback.path:
+        target_path = kwargs.get("path", callback.path)
+        target_method = kwargs.get("method", callback.method)
+
+        # 2. Path나 Method 중 하나라도 변경 요청이 있을 경우 중복 검사 수행
+        if "path" in kwargs or "method" in kwargs:
             existing = db.query(CallbackInfo).filter(
-                CallbackInfo.path == kwargs["path"]
+                CallbackInfo.path == target_path,
+                CallbackInfo.method == target_method,
+                CallbackInfo.callback_id != callback.callback_id  # <--- [핵심] 자기 자신(현재 ID)은 제외
             ).first()
+
             if existing:
-                raise ValueError(f"Callback with path '{kwargs['path']}' already exists")
+                raise ValueError(
+                    f"Callback with path '{target_path}' and method '{target_method}' already exists"
+                )
 
         # chat_id가 제공되는 경우 챗룸 존재 여부 확인
         if "chat_id" in kwargs and kwargs["chat_id"] is not None:
