@@ -12,7 +12,7 @@ from app.models.callback_model import (
     CallbackRegisterRequest,
     CallbackUpdateRequest,
     CallbackResponse,
-    CallbackAllResonse
+    CallbackAllResponse
 )
 from app.repositories.callback_repo import CallbackRepository
 from app.routers.deploy import get_callback_map
@@ -56,11 +56,11 @@ async def register_callback(
         raise HTTPException(status_code=409, detail=str(e))
 
 
-@router.get("/{callback_id}", response_model=CallbackAllResonse)
+@router.get("/{callback_id}", response_model=CallbackAllResponse)
 async def get_callback(
     callback_id: int,
     db: Session = Depends(get_db),
-) -> CallbackAllResonse:
+) -> CallbackAllResponse:
     """
     콜백 조회
 

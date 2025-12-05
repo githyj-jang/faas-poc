@@ -63,7 +63,7 @@ class CallbackResponse(BaseModel):
     class Config:
         from_attributes = True
 
-class CallbackAllResonse(BaseModel):
+class CallbackAllResponse(BaseModel):
     callback_id: int
     path: str
     method: str
