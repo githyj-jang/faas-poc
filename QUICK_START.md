@@ -106,7 +106,7 @@ curl -X PUT "http://localhost:8000/callbacks/1" \
 
 ```bash
 # 배포
-curl -X POST "http://localhost:8000/callback/deploy" \
+curl -X POST "http://localhost:8000/deploy/" \
   -H "Content-Type: application/json" \
   -d '{"callback_id": 1, "status": true, "c_type": "docker"}'
 
@@ -165,7 +165,7 @@ curl -X POST "http://localhost:8000/api/my_python_function" \
                   ▼
 ┌─────────────────────────────────────────┐
 │ 2. 콜백 배포 (백그라운드)               │
-│    POST /callback/deploy                │
+│    POST /deploy/                         │
 │    ├─ 라이브러리 파일 생성              │
 │    │  ├─ Python: requirements.txt       │
 │    │  └─ Node.js: package.json          │

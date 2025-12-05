@@ -5,7 +5,7 @@ Function as a Service Gateway API 프로젝트
 ## 📁 프로젝트 구조
 
 ```
-faas-test/
+faas-poc/
 ├── app/                           # 메인 애플리케이션
 │   ├── __init__.py
 │   ├── main.py                    # FastAPI 앱 설정
@@ -22,7 +22,7 @@ faas-test/
 │   ├── routers/
 │   │   ├── __init__.py
 │   │   ├── api.py                 # API 라우터 (/api/{path})
-│   │   └── deploy.py              # 배포 라우터 (/callback/deploy)
+│   │   └── deploy.py              # 배포 라우터 (/deploy)
 │   ├── utils/
 │   │   ├── __init__.py
 │   │   └── docker_utils.py        # Docker 빌드/실행 유틸
@@ -81,7 +81,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ## 📚 API 엔드포인트
 
 ### 콜백 배포
-- **POST** `/callback/deploy` - 콜백 배포 또는 언배포
+- **POST** `/deploy/` - 콜백 배포 또는 언배포
+- **WS** `/deploy/ws` - 빌드 상태 WebSocket
 
 ### 콜백 실행
 - **GET/POST** `/api/{path_name}` - 콜백 함수 실행
@@ -118,7 +119,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 ### init_db.py
 - 데이터베이스 스키마 생성
-- Callback, ChatRoom, Chats 테이블 생성
+- CallbackInfo, ChatRoom 테이블 생성
 - 이미 존재하는 경우 건너뜀 (IF NOT EXISTS)
 
 ### init_test.py

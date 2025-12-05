@@ -85,7 +85,7 @@ CallbackResponse 반환
 
 ### 콜백 배포 흐름
 ```
-POST /callback/deploy
+POST /deploy/
   ↓
 콜백 상태 → "build"
   ↓
@@ -189,7 +189,7 @@ curl -X PUT "http://localhost:8000/callbacks/1" \
 ### 3. 콜백 배포
 
 ```bash
-curl -X POST "http://localhost:8000/callback/deploy" \
+curl -X POST "http://localhost:8000/deploy/" \
   -H "Content-Type: application/json" \
   -d '{
     "callback_id": 1,
@@ -226,7 +226,7 @@ curl -X POST "http://localhost:8000/api/data_processor" \
 curl -X POST "http://localhost:8000/callbacks/" ...
 
 # 2. 배포
-curl -X POST "http://localhost:8000/callback/deploy" ...
+curl -X POST "http://localhost:8000/deploy/" ...
 
 # 3. 실행
 curl -X POST "http://localhost:8000/api/your_path" ...
