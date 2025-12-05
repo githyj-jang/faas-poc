@@ -385,7 +385,7 @@ run_kube_deploy_tests() {
     log_info "  Step 2: Creating Callback for Kubernetes..."
 
     CURRENT_DEPLOY_PATH="kube_test_${TIMESTAMP}"
-    local python_code='import json\nimport os\ndef handler(event):\n    return {\"statusCode\": 200, \"body\": json.dumps({\"message\": \"Hello from K8s!\", \"pod\": os.environ.get(\"HOSTNAME\", \"unknown\")})}'
+    local python_code='import json\nimport os\ndef lambda_handler(event, context):\n    return {\"statusCode\": 200, \"body\": json.dumps({\"message\": \"Hello from K8s!\", \"pod\": os.environ.get(\"HOSTNAME\", \"unknown\")})}'
 
     local callback_payload="{\"path\": \"${CURRENT_DEPLOY_PATH}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${python_code}\", \"chat_id\": ${CURRENT_CHATROOM_ID}}"
 
@@ -508,6 +508,7 @@ run_kube_lifecycle_tests() {
     start=$(get_time_ms)
     local failed_pods
     failed_pods=$(kubectl get pods -n "$KUBE_NAMESPACE" --no-headers 2>/dev/null | grep -c "Error\|CrashLoopBackOff\|Failed" || echo "0")
+    failed_pods=$(echo "$failed_pods" | tr -d '[:space:]')
     duration=$(($(get_time_ms) - start))
 
     if [[ "$failed_pods" -eq 0 ]]; then
@@ -624,6 +625,233 @@ run_kube_error_tests() {
         fi
     else
         record_result "TC-K8S-ERR02" "Wrong Method Kube" "K8sError" "SKIP" "0" "N/A" "N/A" "No deployed path"
+    fi
+
+    # TC-K8S-ERR03: Delete Building Callback (should fail)
+    log_info "TC-K8S-ERR03: Testing delete during Kube build..."
+
+    # 1. Create ChatRoom
+    local slow_chatroom_result=$(timed_curl -X POST "${FAAS_BASE_URL}/chatroom/" \
+        -H "Content-Type: application/json" \
+        -d '{"title": "slow_kube_build_test"}' \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    local slow_chatroom_body=$(echo "$slow_chatroom_result" | cut -d'|' -f1)
+    local slow_chatroom_id=$(echo "$slow_chatroom_body" | grep -o '"chat_id":[0-9]*' | head -1 | cut -d':' -f2)
+
+    if [[ -z "$slow_chatroom_id" || "$slow_chatroom_id" == "null" ]]; then
+        record_result "TC-K8S-ERR03" "Delete Building Callback" "K8sError" "FAIL" "0" "HTTP 400" "ChatRoom creation failed"
+    else
+        CREATED_CHATROOMS+=("$slow_chatroom_id")
+
+        # 2. Create callback with sleep(28)
+        local slow_callback_code='import time
+import json
+
+def lambda_handler(event, context):
+    time.sleep(28)
+    return {"statusCode": 200, "body": json.dumps({"message": "slow kube build test"})}'
+
+        local encoded_code=$(echo "$slow_callback_code" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+        local slow_callback_result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\": ${slow_chatroom_id}, \"path\": \"slow_kube_build_test\", \"method\": \"GET\", \"type\": \"python\", \"code\": ${encoded_code}}" \
+            --connect-timeout "$TIMEOUT_SHORT")
+
+        local slow_callback_body=$(echo "$slow_callback_result" | cut -d'|' -f1)
+        local slow_callback_id=$(echo "$slow_callback_body" | grep -o '"callback_id":[0-9]*' | head -1 | cut -d':' -f2)
+
+        if [[ -z "$slow_callback_id" || "$slow_callback_id" == "null" ]]; then
+            record_result "TC-K8S-ERR03" "Delete Building Callback" "K8sError" "FAIL" "0" "HTTP 400" "Callback creation failed"
+        else
+            # 3. Start deploy in background (kube type)
+            log_info "  Starting Kube deploy in background..."
+            curl -s -X POST "${FAAS_BASE_URL}/deploy/" \
+                -H "Content-Type: application/json" \
+                -d "{\"callback_id\": ${slow_callback_id}, \"status\": true, \"c_type\": \"kube\"}" &
+            local deploy_pid=$!
+
+            # 4. Wait 1 second then try to delete
+            sleep 1
+
+            log_info "  Attempting to delete callback while building..."
+            local delete_result=$(timed_curl -X DELETE "${FAAS_BASE_URL}/callbacks/${slow_callback_id}" \
+                --connect-timeout "$TIMEOUT_SHORT")
+
+            local delete_http_code=$(echo "$delete_result" | cut -d'|' -f2)
+            local delete_duration=$(echo "$delete_result" | cut -d'|' -f3)
+
+            wait $deploy_pid 2>/dev/null || true
+
+            if [[ "$delete_http_code" == "400" ]]; then
+                record_result "TC-K8S-ERR03" "Delete Building Callback" "K8sError" "PASS" "$delete_duration" "HTTP 400" "HTTP ${delete_http_code}"
+            else
+                if [[ "$delete_http_code" == "200" ]]; then
+                    record_result "TC-K8S-ERR03" "Delete Building Callback" "K8sError" "FAIL" "$delete_duration" "HTTP 400" "HTTP ${delete_http_code}" "Build too fast"
+                else
+                    record_result "TC-K8S-ERR03" "Delete Building Callback" "K8sError" "FAIL" "$delete_duration" "HTTP 400" "HTTP ${delete_http_code}"
+                fi
+            fi
+
+            sleep 2
+            curl -s -X DELETE "${FAAS_BASE_URL}/chatroom/${slow_chatroom_id}" > /dev/null 2>&1 || true
+        fi
+    fi
+}
+
+#===============================================================================
+# Kubernetes Library & ENV Tests
+#===============================================================================
+run_kube_library_env_tests() {
+    log_section "7. Kubernetes Library & Environment Variable Tests"
+
+    local lib_chatroom_id=""
+
+    # TC-K8S-LE01: Create ChatRoom for library test
+    log_info "  Creating ChatRoom for library test..."
+
+    local result
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/chatroom/" \
+        -H "Content-Type: application/json" \
+        -d "{\"title\": \"K8s Library Test ${TIMESTAMP}\"}" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    local body=$(echo "$result" | cut -d'|' -f1)
+    local http_code=$(echo "$result" | cut -d'|' -f2)
+
+    if [[ "$http_code" == "200" ]]; then
+        lib_chatroom_id=$(json_extract_number "$body" "chat_id")
+        CREATED_CHATROOMS+=("$lib_chatroom_id")
+    else
+        record_result "TC-K8S-LE01" "Library Test Setup" "K8sLibrary" "SKIP" "0" "N/A" "N/A" "Failed to create ChatRoom"
+        return
+    fi
+
+    # TC-K8S-LE02: Create Callback with external library
+    log_info "  Creating function with external library (requests)..."
+
+    local lib_path="kube_lib_test_${TIMESTAMP}"
+    local lib_code='import json\nimport requests\ndef lambda_handler(event, context):\n    return {\"statusCode\": 200, \"body\": json.dumps({\"requests_version\": requests.__version__})}'
+    local lib_payload="{\"path\": \"${lib_path}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${lib_code}\", \"library\": \"requests==2.28.0\", \"chat_id\": ${lib_chatroom_id}}"
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
+        -H "Content-Type: application/json" \
+        -d "$lib_payload" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    body=$(echo "$result" | cut -d'|' -f1)
+    http_code=$(echo "$result" | cut -d'|' -f2)
+    local duration=$(echo "$result" | cut -d'|' -f3)
+
+    if [[ "$http_code" == "200" ]]; then
+        local lib_callback_id=$(json_extract_number "$body" "callback_id")
+
+        # Deploy with kube
+        local deploy_payload="{\"callback_id\": ${lib_callback_id}, \"status\": true, \"c_type\": \"kube\"}"
+        curl -s -X POST "${FAAS_BASE_URL}/deploy/" \
+            -H "Content-Type: application/json" \
+            -d "$deploy_payload" \
+            --connect-timeout "$TIMEOUT_SHORT" > /dev/null
+
+        log_info "    Waiting for library function build (45+ seconds)..."
+        sleep $((BUILD_WAIT_TIME + 15))
+
+        # Check status and invoke
+        local check
+        check=$(curl -s "${FAAS_BASE_URL}/callbacks/${lib_callback_id}" --connect-timeout 3)
+        local status=$(json_extract "$check" "status")
+
+        if [[ "$status" == "deployed" ]]; then
+            result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${lib_path}" \
+                -H "Content-Type: application/json" \
+                -d '{}' \
+                --connect-timeout "$TIMEOUT_LONG")
+
+            body=$(echo "$result" | cut -d'|' -f1)
+            http_code=$(echo "$result" | cut -d'|' -f2)
+            duration=$(echo "$result" | cut -d'|' -f3)
+
+            if [[ "$http_code" == "200" ]] && echo "$body" | grep -q "2.28"; then
+                record_result "TC-K8S-LE02" "External Library Function" "K8sLibrary" "PASS" "$duration" "requests 2.28.x" "Library loaded"
+            else
+                record_result "TC-K8S-LE02" "External Library Function" "K8sLibrary" "FAIL" "$duration" "requests 2.28.x" "HTTP ${http_code}"
+            fi
+        else
+            record_result "TC-K8S-LE02" "External Library Function" "K8sLibrary" "FAIL" "0" "status=deployed" "status=${status}" "Build failed"
+        fi
+    else
+        record_result "TC-K8S-LE02" "External Library Function" "K8sLibrary" "FAIL" "$duration" "HTTP 200" "HTTP ${http_code}"
+    fi
+
+    # TC-K8S-LE03: Environment Variable Test
+    log_info "  Testing environment variables..."
+
+    local env_chatroom_id=""
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/chatroom/" \
+        -H "Content-Type: application/json" \
+        -d "{\"title\": \"K8s Env Test ${TIMESTAMP}\"}" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    body=$(echo "$result" | cut -d'|' -f1)
+    http_code=$(echo "$result" | cut -d'|' -f2)
+
+    if [[ "$http_code" == "200" ]]; then
+        env_chatroom_id=$(json_extract_number "$body" "chat_id")
+        CREATED_CHATROOMS+=("$env_chatroom_id")
+
+        local env_path="kube_env_test_${TIMESTAMP}"
+        local env_code='import os\nimport json\ndef lambda_handler(event, context):\n    api_key = os.environ.get(\"API_KEY\", \"NOTSET\")\n    return {\"statusCode\": 200, \"body\": json.dumps({\"api_key_prefix\": api_key[:3] if len(api_key) >= 3 else api_key})}'
+        local env_payload="{\"path\": \"${env_path}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${env_code}\", \"env\": {\"API_KEY\": \"secret123\", \"DB_HOST\": \"localhost\"}, \"chat_id\": ${env_chatroom_id}}"
+
+        result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
+            -H "Content-Type: application/json" \
+            -d "$env_payload" \
+            --connect-timeout "$TIMEOUT_SHORT")
+
+        body=$(echo "$result" | cut -d'|' -f1)
+        http_code=$(echo "$result" | cut -d'|' -f2)
+
+        if [[ "$http_code" == "200" ]]; then
+            local env_callback_id=$(json_extract_number "$body" "callback_id")
+
+            # Deploy with kube
+            local deploy_payload="{\"callback_id\": ${env_callback_id}, \"status\": true, \"c_type\": \"kube\"}"
+            curl -s -X POST "${FAAS_BASE_URL}/deploy/" \
+                -H "Content-Type: application/json" \
+                -d "$deploy_payload" \
+                --connect-timeout "$TIMEOUT_SHORT" > /dev/null
+
+            log_info "    Waiting for env function build..."
+            sleep $BUILD_WAIT_TIME
+
+            # Check status
+            local check
+            check=$(curl -s "${FAAS_BASE_URL}/callbacks/${env_callback_id}" --connect-timeout 3)
+            local status=$(json_extract "$check" "status")
+
+            if [[ "$status" == "deployed" ]]; then
+                result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${env_path}" \
+                    -H "Content-Type: application/json" \
+                    -d '{}' \
+                    --connect-timeout "$TIMEOUT_LONG")
+
+                body=$(echo "$result" | cut -d'|' -f1)
+                http_code=$(echo "$result" | cut -d'|' -f2)
+                duration=$(echo "$result" | cut -d'|' -f3)
+
+                if [[ "$http_code" == "200" ]] && echo "$body" | grep -q "sec"; then
+                    record_result "TC-K8S-LE03" "Environment Variable Test" "K8sLibrary" "PASS" "$duration" "API_KEY=sec..." "Env vars work"
+                else
+                    record_result "TC-K8S-LE03" "Environment Variable Test" "K8sLibrary" "FAIL" "$duration" "API_KEY set" "HTTP ${http_code}"
+                fi
+            else
+                record_result "TC-K8S-LE03" "Environment Variable Test" "K8sLibrary" "FAIL" "0" "status=deployed" "status=${status}" "Build failed"
+            fi
+        else
+            record_result "TC-K8S-LE03" "Environment Variable Test" "K8sLibrary" "FAIL" "0" "HTTP 200" "HTTP ${http_code}"
+        fi
+    else
+        record_result "TC-K8S-LE03" "Environment Variable Test" "K8sLibrary" "SKIP" "0" "N/A" "N/A" "Failed to create ChatRoom"
     fi
 }
 
@@ -993,6 +1221,7 @@ main() {
     run_kube_lifecycle_tests
     run_kube_performance_tests
     run_kube_error_tests
+    run_kube_library_env_tests
     run_kube_cleanup_tests
 
     # Generate reports
