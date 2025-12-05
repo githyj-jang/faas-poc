@@ -6,7 +6,6 @@
 
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
-from app.routers.deploy import get_callback_map
 
 from app.core.database import get_db
 from app.models.callback_model import (
@@ -16,6 +15,7 @@ from app.models.callback_model import (
     CallbackAllResonse
 )
 from app.repositories.callback_repo import CallbackRepository
+from app.routers.deploy import get_callback_map
 
 router = APIRouter(prefix="/callbacks", tags=["callbacks"])
 

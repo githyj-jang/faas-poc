@@ -1,8 +1,9 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.database import init_db
 from app.routers import api, deploy, callback, chatroom
-from fastapi.middleware.cors import CORSMiddleware
+
 
 def create_app() -> FastAPI:
     """

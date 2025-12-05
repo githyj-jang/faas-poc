@@ -1,4 +1,3 @@
-import asyncio
 from fastapi import APIRouter, HTTPException, Depends, WebSocket, BackgroundTasks, Query
 from sqlalchemy.orm import Session
 
@@ -9,7 +8,6 @@ from app.utils.broadcast_utils import connected_websockets
 from app.utils.docker_utils import (
     build_callback_image_background,
 )
-from app.utils.kube_utils import build_kube_callback_image
 
 router = APIRouter(prefix="/deploy", tags=["deploy"])
 

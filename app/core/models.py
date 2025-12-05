@@ -6,6 +6,7 @@ SQLAlchemy ORM 모델
 
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, func, JSON
 from sqlalchemy.orm import relationship
+
 from app.core.database import Base
 
 

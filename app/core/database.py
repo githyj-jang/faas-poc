@@ -4,10 +4,11 @@
 SQLAlchemy를 사용한 SQLite 데이터베이스 관리
 """
 
+from pathlib import Path
+
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from pathlib import Path
 
 # 데이터베이스 경로
 PROJECT_ROOT = Path(__file__).parent.parent.parent

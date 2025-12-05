@@ -1,16 +1,14 @@
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request, Depends
-
-from app.models.callback_model import CallbackDeployResponse
-from app.routers.deploy import get_callback_map
-from app.utils.docker_utils import run_callback_container
-from app.utils.kube_utils import run_lambda_job, get_job_pod_name, read_pod_logs
-from app.utils.broadcast_utils import broadcast
-
 from sqlalchemy.orm import Session
+
 from app.core.database import get_db
 from app.repositories.callback_repo import CallbackRepository
+from app.routers.deploy import get_callback_map
+from app.utils.broadcast_utils import broadcast
+from app.utils.docker_utils import run_callback_container
+from app.utils.kube_utils import run_lambda_job, get_job_pod_name, read_pod_logs
 
 router = APIRouter(prefix="/api", tags=["api"])
 

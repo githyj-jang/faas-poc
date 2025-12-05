@@ -8,9 +8,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
+from app.models.lambda_model import LambdaStatusCode
 from app.utils.broadcast_utils import broadcast
 from app.utils.kube_utils import build_kube_callback_image
-from app.models.lambda_model import LambdaStatusCode
 
 logger = logging.getLogger(__name__)
 

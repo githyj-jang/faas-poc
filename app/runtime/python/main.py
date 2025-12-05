@@ -1,6 +1,8 @@
-import os
 import json
+import os
+
 import requests
+
 from runner import execute_lambda
 
 SESSION_ID = os.environ.get("SESSION_ID")
