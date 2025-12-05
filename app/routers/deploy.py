@@ -2,12 +2,16 @@ from fastapi import APIRouter, HTTPException, Depends, WebSocket, BackgroundTask
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.logger import setup_logger
 from app.models.callback_model import CallbackDeployRequest, CallbackResponse
 from app.repositories.callback_repo import CallbackRepository
 from app.utils.broadcast_utils import connected_websockets
 from app.utils.docker_utils import (
     build_callback_image_background,
 )
+
+# 로거 초기화
+logger = setup_logger(__name__)
 
 router = APIRouter(prefix="/deploy", tags=["deploy"])
 
@@ -46,11 +50,13 @@ async def deploy_callback_docker(
 
     if req.status is False:
         # undeploy
+        logger.info(f"Undeploying callback {req.callback_id}: {callback.method} {callback.path}")
         if callback.path in callback_map and callback.method in callback_map[callback.path]:
             del callback_map[callback.path][callback.method]
             if not callback_map[callback.path]:
                 del callback_map[callback.path]
         CallbackRepository.update_callback(db, req.callback_id, status="undeployed")
+        logger.info(f"Callback {req.callback_id} undeployed successfully")
         return callback
 
     # 상태를 'build'로 변경
@@ -98,18 +104,17 @@ async def _build_and_register_callback(
     """
     try:
         image_name = f"callback_{callback_id}".lower()
-        print("Create Image")
-        print(image_name)
+        logger.info(f"Creating image for callback {callback_id}: {image_name}")
         building_callbacks[callback_id] = image_name
 
-        print("Building...")
-        
+        logger.info(f"Building callback image: {image_name} (runtime: {runtime_type}, type: {c_type})")
+
         # 빌드 실행
         result = await build_callback_image_background(
             callback_id, code, runtime_type, c_type, lib, env
         )
-        print("END")
-        print(result)
+        logger.info(f"Build completed for callback {callback_id}")
+        logger.debug(f"Build result: {result}")
 
         if result["status"] == "success":
             # 빌드 성공: 콜백 맵에 등록 및 상태 변경
@@ -117,19 +122,21 @@ async def _build_and_register_callback(
 
             if normalized_path not in callback_map:
                 callback_map[normalized_path] = {}
-            
+
             callback_map[normalized_path][method] = result["image"]
-            
+
             CallbackRepository.update_callback(
                 db, callback_id, status="deployed"
             )
+            logger.info(f"Callback {callback_id} deployed successfully at {method} {normalized_path}")
         else:
             # 빌드 실패: 상태를 'failed'로 변경
+            logger.warning(f"Build failed for callback {callback_id}: {result.get('error', 'Unknown error')}")
             CallbackRepository.update_callback(db, callback_id, status="failed")
 
     except Exception as e:
         # 예외 발생: 상태를 'failed'로 변경
-        print(f"Build error for callback {callback_id}: {str(e)}")
+        logger.error(f"Build error for callback {callback_id}: {str(e)}", exc_info=True)
         CallbackRepository.update_callback(db, callback_id, status="failed")
     finally:
         # 빌드 중 딕셔너리에서 제거
