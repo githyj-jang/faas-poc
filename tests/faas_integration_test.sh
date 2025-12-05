@@ -1126,8 +1126,79 @@ run_error_handling_tests() {
     fi
 
     # TC-ERR05: Delete Building Callback (should fail)
-    # 이 테스트는 빌드 중인 콜백이 있을 때만 의미가 있음
-    record_result "TC-ERR05" "Delete Building Callback" "Error" "SKIP" "0" "N/A" "N/A" "Requires active build"
+    # sleep(28)을 사용하는 콜백을 생성하고 배포 시작 직후 삭제 시도
+    log_info "TC-ERR05: Creating slow-building callback for delete test..."
+
+    # 1. ChatRoom 생성
+    local slow_chatroom_result=$(timed_curl -X POST "${FAAS_BASE_URL}/chatroom/" \
+        -H "Content-Type: application/json" \
+        -d '{"title": "slow_build_test_room"}' \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    local slow_chatroom_body=$(echo "$slow_chatroom_result" | cut -d'|' -f1)
+    local slow_chatroom_id=$(echo "$slow_chatroom_body" | grep -o '"chat_id":[0-9]*' | head -1 | cut -d':' -f2)
+
+    if [[ -z "$slow_chatroom_id" || "$slow_chatroom_id" == "null" ]]; then
+        record_result "TC-ERR05" "Delete Building Callback" "Error" "FAIL" "0" "HTTP 400" "ChatRoom creation failed" "Could not create chatroom"
+    else
+        # 2. sleep(28)을 포함하는 콜백 생성 (빌드에 28초 이상 소요)
+        local slow_callback_code='import time
+import json
+
+def handler(event, context):
+    time.sleep(28)
+    return {"statusCode": 200, "body": json.dumps({"message": "slow build test"})}'
+
+        local encoded_code=$(echo "$slow_callback_code" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+        local slow_callback_result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\": ${slow_chatroom_id}, \"path\": \"slow_build_test\", \"method\": \"GET\", \"type\": \"python\", \"code\": ${encoded_code}}" \
+            --connect-timeout "$TIMEOUT_SHORT")
+
+        local slow_callback_body=$(echo "$slow_callback_result" | cut -d'|' -f1)
+        local slow_callback_id=$(echo "$slow_callback_body" | grep -o '"callback_id":[0-9]*' | head -1 | cut -d':' -f2)
+
+        if [[ -z "$slow_callback_id" || "$slow_callback_id" == "null" ]]; then
+            record_result "TC-ERR05" "Delete Building Callback" "Error" "FAIL" "0" "HTTP 400" "Callback creation failed" "Could not create callback"
+        else
+            # 3. 배포 시작 (비동기로 실행 - 백그라운드에서)
+            log_info "TC-ERR05: Starting deploy in background..."
+            curl -s -X POST "${FAAS_BASE_URL}/deploy/" \
+                -H "Content-Type: application/json" \
+                -d "{\"callback_id\": ${slow_callback_id}, \"status\": true, \"c_type\": \"docker\"}" &
+            local deploy_pid=$!
+
+            # 4. 1초 대기 후 삭제 시도 (빌드 중일 때)
+            sleep 1
+
+            log_info "TC-ERR05: Attempting to delete callback while building..."
+            local delete_result=$(timed_curl -X DELETE "${FAAS_BASE_URL}/callbacks/${slow_callback_id}" \
+                --connect-timeout "$TIMEOUT_SHORT")
+
+            local delete_http_code=$(echo "$delete_result" | cut -d'|' -f2)
+            local delete_duration=$(echo "$delete_result" | cut -d'|' -f3)
+            local delete_body=$(echo "$delete_result" | cut -d'|' -f1)
+
+            # 배포 프로세스 종료 대기 (타임아웃 설정)
+            wait $deploy_pid 2>/dev/null || true
+
+            # 5. 결과 검증: 빌드 중 삭제는 HTTP 400이어야 함
+            if [[ "$delete_http_code" == "400" ]]; then
+                record_result "TC-ERR05" "Delete Building Callback" "Error" "PASS" "$delete_duration" "HTTP 400" "HTTP ${delete_http_code}"
+            else
+                # 만약 삭제가 성공했다면 (HTTP 200), 빌드가 너무 빨리 완료된 것
+                if [[ "$delete_http_code" == "200" ]]; then
+                    record_result "TC-ERR05" "Delete Building Callback" "Error" "FAIL" "$delete_duration" "HTTP 400" "HTTP ${delete_http_code}" "Build completed too fast, delete succeeded"
+                else
+                    record_result "TC-ERR05" "Delete Building Callback" "Error" "FAIL" "$delete_duration" "HTTP 400" "HTTP ${delete_http_code}" "Response: ${delete_body}"
+                fi
+            fi
+
+            # 6. 정리: ChatRoom 삭제 (cascade로 callback도 삭제됨)
+            sleep 2  # 배포 정리를 위해 잠시 대기
+            curl -s -X DELETE "${FAAS_BASE_URL}/chatroom/${slow_chatroom_id}" > /dev/null 2>&1 || true
+        fi
+    fi
 }
 
 #===============================================================================
