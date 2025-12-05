@@ -486,7 +486,7 @@ run_service_flow_tests() {
     log_info "  Step 2: Creating Callback linked to ChatRoom..."
 
     CURRENT_DEPLOY_PATH="flow_test_${TIMESTAMP}"
-    local python_code='import json\ndef handler(event):\n    body = event.get(\"body\", {})\n    return {\"statusCode\": 200, \"body\": json.dumps({\"message\": \"Service flow works!\", \"received\": body})}'
+    local python_code='import json\ndef lambda_handler(event, context):\n    body = event.get(\"body\", {})\n    return {\"statusCode\": 200, \"body\": json.dumps({\"message\": \"Service flow works!\", \"received\": body})}'
 
     local callback_payload="{\"path\": \"${CURRENT_DEPLOY_PATH}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${python_code}\", \"chat_id\": ${CURRENT_CHATROOM_ID}}"
 
@@ -654,7 +654,7 @@ run_callback_crud_tests() {
     # TC-CB01: Create Callback without chat_id (standalone)
     log_info "  Testing standalone callback (without chat_id)..."
 
-    local python_code='import json\ndef handler(event):\n    return {\"statusCode\": 200, \"body\": json.dumps({\"message\": \"Standalone callback\"})}'
+    local python_code='import json\ndef lambda_handler(event, context):\n    return {\"statusCode\": 200, \"body\": json.dumps({\"message\": \"Standalone callback\"})}'
     local payload="{\"path\": \"standalone_${TIMESTAMP}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${python_code}\"}"
 
     local result
@@ -708,7 +708,7 @@ run_callback_crud_tests() {
     # TC-CB02: Create Callback with invalid chat_id
     log_info "  Testing callback creation with invalid chat_id..."
 
-    payload="{\"path\": \"invalid_chat_${TIMESTAMP}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"def handler(e): pass\", \"chat_id\": 99999}"
+    payload="{\"path\": \"invalid_chat_${TIMESTAMP}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"def lambda_handler(e, c): pass\", \"chat_id\": 99999}"
 
     result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
         -H "Content-Type: application/json" \
@@ -770,7 +770,7 @@ run_callback_crud_tests() {
     if [[ -n "$test_callback_id" ]]; then
         sleep 1
 
-        local update_payload="{\"code\": \"import json\\ndef handler(event):\\n    return {\\\"statusCode\\\": 200, \\\"body\\\": json.dumps({\\\"message\\\": \\\"Updated!\\\"})}\"}"
+        local update_payload="{\"code\": \"import json\\ndef lambda_handler(event, context):\\n    return {\\\"statusCode\\\": 200, \\\"body\\\": json.dumps({\\\"message\\\": \\\"Updated!\\\"})}\"}"
 
         result=$(timed_curl -X PUT "${FAAS_BASE_URL}/callbacks/${test_callback_id}" \
             -H "Content-Type: application/json" \
@@ -789,7 +789,7 @@ run_callback_crud_tests() {
 
     # TC-CB07: Duplicate Path Creation
     if [[ -n "$test_callback_id" ]]; then
-        payload="{\"path\": \"standalone_${TIMESTAMP}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"def handler(e): pass\"}"
+        payload="{\"path\": \"standalone_${TIMESTAMP}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"def lambda_handler(e, c): pass\"}"
 
         result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
             -H "Content-Type: application/json" \
@@ -858,7 +858,7 @@ run_cascade_delete_test() {
     # Step 2: Create Callback linked to ChatRoom
     log_info "  Creating Callback linked to ChatRoom..."
 
-    local python_code='def handler(e): return {\"statusCode\": 200}'
+    local python_code='def lambda_handler(e, c): return {\"statusCode\": 200}'
     local payload="{\"path\": \"cascade_${TIMESTAMP}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${python_code}\", \"chat_id\": ${cascade_chatroom_id}}"
 
     result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
@@ -948,7 +948,7 @@ run_library_env_tests() {
     log_info "  Creating function with external library (this may take a while)..."
 
     local lib_path="lib_test_${TIMESTAMP}"
-    local lib_code='import json\nimport requests\ndef handler(event):\n    return {\"statusCode\": 200, \"body\": json.dumps({\"requests_version\": requests.__version__})}'
+    local lib_code='import json\nimport requests\ndef lambda_handler(event, context):\n    return {\"statusCode\": 200, \"body\": json.dumps({\"requests_version\": requests.__version__})}'
     local lib_payload="{\"path\": \"${lib_path}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${lib_code}\", \"library\": \"requests==2.28.0\", \"chat_id\": ${lib_chatroom_id}}"
 
     result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
@@ -1016,7 +1016,7 @@ run_library_env_tests() {
         CREATED_CHATROOMS+=("$env_chatroom_id")
 
         local env_path="env_test_${TIMESTAMP}"
-        local env_code='import os\nimport json\ndef handler(event):\n    api_key = os.environ.get(\"API_KEY\", \"NOTSET\")\n    return {\"statusCode\": 200, \"body\": json.dumps({\"api_key_prefix\": api_key[:3] if len(api_key) >= 3 else api_key})}'
+        local env_code='import os\nimport json\ndef lambda_handler(event, context):\n    api_key = os.environ.get(\"API_KEY\", \"NOTSET\")\n    return {\"statusCode\": 200, \"body\": json.dumps({\"api_key_prefix\": api_key[:3] if len(api_key) >= 3 else api_key})}'
         local env_payload="{\"path\": \"${env_path}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${env_code}\", \"env\": {\"API_KEY\": \"secret123\", \"DB_HOST\": \"localhost\"}, \"chat_id\": ${env_chatroom_id}}"
 
         result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
@@ -1145,7 +1145,7 @@ run_error_handling_tests() {
         local slow_callback_code='import time
 import json
 
-def handler(event, context):
+def lambda_handler(event, context):
     time.sleep(28)
     return {"statusCode": 200, "body": json.dumps({"message": "slow build test"})}'
 
@@ -1453,7 +1453,7 @@ run_quick_test() {
         local cb_response
         cb_response=$(curl -s -X POST "${FAAS_BASE_URL}/callbacks/" \
             -H "Content-Type: application/json" \
-            -d "{\"path\": \"quick_${TIMESTAMP}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"def handler(e): return {\\\"statusCode\\\": 200}\", \"chat_id\": ${chat_id}}" \
+            -d "{\"path\": \"quick_${TIMESTAMP}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"def lambda_handler(e, c): return {\\\"statusCode\\\": 200}\", \"chat_id\": ${chat_id}}" \
             --connect-timeout 5)
 
         if echo "$cb_response" | grep -q "callback_id"; then
