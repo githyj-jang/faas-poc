@@ -1642,10 +1642,11 @@ def lambda_handler(event, context):
     http_code=$(echo "$result" | cut -d'|' -f2)
     duration=$(echo "$result" | cut -d'|' -f3)
 
-    if [[ "$http_code" == "404" ]]; then
-        record_result "TC-UNDEPLOY03" "Invoke After Undeploy" "Undeploy" "PASS" "$duration" "HTTP 404" "HTTP ${http_code}"
+    # Undeploy 후에는 404 또는 405가 반환될 수 있음 (callback_map에서 제거됨)
+    if [[ "$http_code" == "404" || "$http_code" == "405" ]]; then
+        record_result "TC-UNDEPLOY03" "Invoke After Undeploy" "Undeploy" "PASS" "$duration" "HTTP 404/405" "HTTP ${http_code}"
     else
-        record_result "TC-UNDEPLOY03" "Invoke After Undeploy" "Undeploy" "FAIL" "$duration" "HTTP 404" "HTTP ${http_code}"
+        record_result "TC-UNDEPLOY03" "Invoke After Undeploy" "Undeploy" "FAIL" "$duration" "HTTP 404/405" "HTTP ${http_code}"
     fi
 }
 
