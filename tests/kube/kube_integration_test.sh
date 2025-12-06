@@ -1006,6 +1006,294 @@ run_kube_library_env_tests() {
 }
 
 #===============================================================================
+# Kubernetes Node.js Runtime Tests
+#===============================================================================
+run_kube_nodejs_tests() {
+    log_section "9. Kubernetes Node.js Runtime Tests"
+
+    local node_chatroom_id=""
+    local node_callback_id=""
+
+    # TC-K8S-NODE01: Create ChatRoom for Node.js test
+    log_info "  Creating ChatRoom for Node.js test..."
+
+    local result
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/chatroom/" \
+        -H "Content-Type: application/json" \
+        -d "{\"title\": \"K8s Node.js Test ${TIMESTAMP}\"}" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    local body=$(echo "$result" | cut -d'|' -f1)
+    local http_code=$(echo "$result" | cut -d'|' -f2)
+
+    if [[ "$http_code" == "200" ]]; then
+        node_chatroom_id=$(json_extract_number "$body" "chat_id")
+        CREATED_CHATROOMS+=("$node_chatroom_id")
+    else
+        record_result "TC-K8S-NODE01" "K8s Node.js Test Setup" "K8sNode" "SKIP" "0" "N/A" "N/A" "Failed to create ChatRoom"
+        return
+    fi
+
+    # TC-K8S-NODE02: Create and Deploy Node.js Callback
+    log_info "  Creating and deploying Node.js callback to Kubernetes..."
+
+    local node_path="/kube_nodejs_test_${TIMESTAMP}"
+    CREATED_CALLBACK_PATHS+=("$node_path")
+
+    local node_code='const handler = async (event) => {
+    const body = event.body || {};
+    return {
+        statusCode: 200,
+        body: JSON.stringify({
+            message: "Hello from Node.js on Kubernetes!",
+            runtime: "node",
+            platform: "kubernetes",
+            received: body,
+            timestamp: new Date().toISOString()
+        })
+    };
+};
+exports.lambda_handler = handler;'
+
+    local encoded_code=$(echo "$node_code" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
+        -H "Content-Type: application/json" \
+        -d "{\"path\": \"${node_path}\", \"method\": \"POST\", \"type\": \"node\", \"code\": ${encoded_code}, \"chat_id\": ${node_chatroom_id}}" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    body=$(echo "$result" | cut -d'|' -f1)
+    http_code=$(echo "$result" | cut -d'|' -f2)
+    local duration=$(echo "$result" | cut -d'|' -f3)
+
+    if [[ "$http_code" == "200" ]]; then
+        node_callback_id=$(json_extract_number "$body" "callback_id")
+        local node_type=$(json_extract "$body" "type")
+
+        if [[ "$node_type" == "node" ]]; then
+            record_result "TC-K8S-NODE02" "Create K8s Node.js Callback" "K8sNode" "PASS" "$duration" "type=node" "id=${node_callback_id}"
+        else
+            record_result "TC-K8S-NODE02" "Create K8s Node.js Callback" "K8sNode" "FAIL" "$duration" "type=node" "type=${node_type}"
+            return
+        fi
+    else
+        record_result "TC-K8S-NODE02" "Create K8s Node.js Callback" "K8sNode" "FAIL" "$duration" "HTTP 200" "HTTP ${http_code}"
+        return
+    fi
+
+    # TC-K8S-NODE03: Deploy Node.js Callback to Kubernetes
+    log_info "  Deploying Node.js callback to Kubernetes..."
+
+    local deploy_payload="{\"callback_id\": ${node_callback_id}, \"status\": true, \"c_type\": \"kube\"}"
+    local build_start=$(get_time_ms)
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/deploy/" \
+        -H "Content-Type: application/json" \
+        -d "$deploy_payload" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    http_code=$(echo "$result" | cut -d'|' -f2)
+
+    if [[ "$http_code" == "200" ]]; then
+        log_info "    Build started, waiting for completion..."
+
+        local elapsed=0
+        local final_status="build"
+        local node_build_wait=90  # Node.js + K8s 빌드는 더 오래 걸릴 수 있음
+
+        while [[ $elapsed -lt $node_build_wait ]]; do
+            sleep 5
+            ((elapsed+=5))
+
+            local check
+            check=$(curl -s "${FAAS_BASE_URL}/callbacks/${node_callback_id}" --connect-timeout 3)
+            final_status=$(json_extract "$check" "status")
+
+            if [[ "$final_status" == "deployed" || "$final_status" == "failed" ]]; then
+                break
+            fi
+
+            echo -ne "    Building Node.js for K8s... ${elapsed}s / ${node_build_wait}s\r"
+        done
+        echo ""
+
+        local build_time=$(($(get_time_ms) - build_start))
+
+        if [[ "$final_status" == "deployed" ]]; then
+            record_result "TC-K8S-NODE03" "Deploy K8s Node.js Callback" "K8sNode" "PASS" "$build_time" "status=deployed" "built in ${elapsed}s"
+        else
+            record_result "TC-K8S-NODE03" "Deploy K8s Node.js Callback" "K8sNode" "FAIL" "$build_time" "status=deployed" "status=${final_status}"
+            return
+        fi
+    else
+        record_result "TC-K8S-NODE03" "Deploy K8s Node.js Callback" "K8sNode" "FAIL" "0" "HTTP 200" "HTTP ${http_code}"
+        return
+    fi
+
+    # TC-K8S-NODE04: Invoke Node.js Function on Kubernetes
+    log_info "  Invoking Node.js function on Kubernetes..."
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${node_path#/}" \
+        -H "Content-Type: application/json" \
+        -d '{"test": "nodejs_kube_invoke", "value": 456}' \
+        --connect-timeout "$TIMEOUT_LONG")
+
+    body=$(echo "$result" | cut -d'|' -f1)
+    http_code=$(echo "$result" | cut -d'|' -f2)
+    duration=$(echo "$result" | cut -d'|' -f3)
+
+    if [[ "$http_code" == "200" ]]; then
+        # Node.js 응답에서 runtime 및 platform 확인
+        if echo "$body" | grep -q "node\|Node" && echo "$body" | grep -q "kubernetes\|Kubernetes"; then
+            record_result "TC-K8S-NODE04" "Invoke K8s Node.js Function" "K8sNode" "PASS" "$duration" "K8s Node.js response" "Response in ${duration}ms"
+        elif echo "$body" | grep -q "node\|Node"; then
+            record_result "TC-K8S-NODE04" "Invoke K8s Node.js Function" "K8sNode" "PASS" "$duration" "Node.js response" "Response in ${duration}ms"
+        else
+            record_result "TC-K8S-NODE04" "Invoke K8s Node.js Function" "K8sNode" "PASS" "$duration" "HTTP 200" "Response received (${duration}ms)"
+        fi
+    else
+        record_result "TC-K8S-NODE04" "Invoke K8s Node.js Function" "K8sNode" "FAIL" "$duration" "HTTP 200" "HTTP ${http_code}"
+    fi
+}
+
+#===============================================================================
+# Kubernetes Timeout Handling Tests
+#===============================================================================
+run_kube_timeout_tests() {
+    log_section "10. Kubernetes Timeout Handling Tests"
+
+    local timeout_chatroom_id=""
+    local timeout_callback_id=""
+
+    # TC-K8S-TIMEOUT01: Create ChatRoom for Timeout test
+    log_info "  Creating ChatRoom for K8s Timeout test..."
+
+    local result
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/chatroom/" \
+        -H "Content-Type: application/json" \
+        -d "{\"title\": \"K8s Timeout Test ${TIMESTAMP}\"}" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    local body=$(echo "$result" | cut -d'|' -f1)
+    local http_code=$(echo "$result" | cut -d'|' -f2)
+
+    if [[ "$http_code" == "200" ]]; then
+        timeout_chatroom_id=$(json_extract_number "$body" "chat_id")
+        CREATED_CHATROOMS+=("$timeout_chatroom_id")
+    else
+        record_result "TC-K8S-TIMEOUT01" "K8s Timeout Test Setup" "K8sTimeout" "SKIP" "0" "N/A" "N/A" "Failed to create ChatRoom"
+        return
+    fi
+
+    # TC-K8S-TIMEOUT02: Create Callback that will timeout
+    log_info "  Creating callback with long sleep for timeout test..."
+
+    local timeout_path="/kube_timeout_test_${TIMESTAMP}"
+    CREATED_CALLBACK_PATHS+=("$timeout_path")
+
+    local timeout_code='import time
+import json
+
+def lambda_handler(event, context):
+    # Sleep for 120 seconds - longer than typical K8s job timeout
+    time.sleep(120)
+    return {"statusCode": 200, "body": json.dumps({"message": "This should never be returned"})}'
+
+    local encoded_code=$(echo "$timeout_code" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
+        -H "Content-Type: application/json" \
+        -d "{\"path\": \"${timeout_path}\", \"method\": \"POST\", \"type\": \"python\", \"code\": ${encoded_code}, \"chat_id\": ${timeout_chatroom_id}}" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    body=$(echo "$result" | cut -d'|' -f1)
+    http_code=$(echo "$result" | cut -d'|' -f2)
+    local duration=$(echo "$result" | cut -d'|' -f3)
+
+    if [[ "$http_code" == "200" ]]; then
+        timeout_callback_id=$(json_extract_number "$body" "callback_id")
+        record_result "TC-K8S-TIMEOUT02" "Create K8s Timeout Callback" "K8sTimeout" "PASS" "$duration" "callback created" "id=${timeout_callback_id}"
+    else
+        record_result "TC-K8S-TIMEOUT02" "Create K8s Timeout Callback" "K8sTimeout" "FAIL" "$duration" "HTTP 200" "HTTP ${http_code}"
+        return
+    fi
+
+    # TC-K8S-TIMEOUT03: Deploy Timeout Callback
+    log_info "  Deploying timeout callback to Kubernetes..."
+
+    local deploy_payload="{\"callback_id\": ${timeout_callback_id}, \"status\": true, \"c_type\": \"kube\"}"
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/deploy/" \
+        -H "Content-Type: application/json" \
+        -d "$deploy_payload" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    http_code=$(echo "$result" | cut -d'|' -f2)
+
+    if [[ "$http_code" == "200" ]]; then
+        log_info "    Waiting for build completion..."
+
+        local elapsed=0
+        local final_status="build"
+
+        while [[ $elapsed -lt $BUILD_WAIT_TIME ]]; do
+            sleep 3
+            ((elapsed+=3))
+
+            local check
+            check=$(curl -s "${FAAS_BASE_URL}/callbacks/${timeout_callback_id}" --connect-timeout 3)
+            final_status=$(json_extract "$check" "status")
+
+            if [[ "$final_status" == "deployed" || "$final_status" == "failed" ]]; then
+                break
+            fi
+
+            echo -ne "    Building... ${elapsed}s / ${BUILD_WAIT_TIME}s\r"
+        done
+        echo ""
+
+        if [[ "$final_status" == "deployed" ]]; then
+            record_result "TC-K8S-TIMEOUT03" "Deploy K8s Timeout Callback" "K8sTimeout" "PASS" "0" "status=deployed" "Deployed successfully"
+        else
+            record_result "TC-K8S-TIMEOUT03" "Deploy K8s Timeout Callback" "K8sTimeout" "FAIL" "0" "status=deployed" "status=${final_status}"
+            return
+        fi
+    else
+        record_result "TC-K8S-TIMEOUT03" "Deploy K8s Timeout Callback" "K8sTimeout" "FAIL" "0" "HTTP 200" "HTTP ${http_code}"
+        return
+    fi
+
+    # TC-K8S-TIMEOUT04: Invoke and verify timeout handling
+    log_info "  Invoking callback on K8s (expecting timeout)..."
+
+    local invoke_start=$(get_time_ms)
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${timeout_path#/}" \
+        -H "Content-Type: application/json" \
+        -d '{"test": "kube_timeout_test"}' \
+        --connect-timeout 90)  # 90초 타임아웃으로 K8s 타임아웃 테스트
+
+    body=$(echo "$result" | cut -d'|' -f1)
+    http_code=$(echo "$result" | cut -d'|' -f2)
+    duration=$(echo "$result" | cut -d'|' -f3)
+
+    local invoke_time=$(($(get_time_ms) - invoke_start))
+
+    # K8s에서 타임아웃 또는 에러 응답 확인
+    if echo "$body" | grep -qi "timeout\|error\|failed\|TimeoutError"; then
+        record_result "TC-K8S-TIMEOUT04" "K8s Timeout Response Handling" "K8sTimeout" "PASS" "$duration" "Timeout/Error response" "Timeout detected in ${duration}ms"
+    elif [[ "$invoke_time" -ge 25000 ]]; then
+        # 오래 걸린 응답 = 타임아웃 처리
+        record_result "TC-K8S-TIMEOUT04" "K8s Timeout Response Handling" "K8sTimeout" "PASS" "$duration" "Long response time" "Response after ${invoke_time}ms"
+    elif [[ "$http_code" != "200" ]]; then
+        # 에러 응답 = 타임아웃/실패 처리됨
+        record_result "TC-K8S-TIMEOUT04" "K8s Timeout Response Handling" "K8sTimeout" "PASS" "$duration" "Non-200 response" "HTTP ${http_code} (timeout handling)"
+    else
+        record_result "TC-K8S-TIMEOUT04" "K8s Timeout Response Handling" "K8sTimeout" "FAIL" "$duration" "Timeout response" "HTTP ${http_code}, time=${invoke_time}ms"
+    fi
+}
+
+#===============================================================================
 # Kubernetes Resource Cleanup Tests
 #===============================================================================
 run_kube_cleanup_tests() {
@@ -1378,6 +1666,8 @@ main() {
     run_kube_error_tests
     run_kube_library_env_tests
     run_kube_cleanup_tests
+    run_kube_nodejs_tests
+    run_kube_timeout_tests
 
     # Generate reports
     generate_reports

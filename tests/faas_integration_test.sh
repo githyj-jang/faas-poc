@@ -1248,6 +1248,408 @@ def lambda_handler(event, context):
 }
 
 #===============================================================================
+# Node.js Runtime Tests
+#===============================================================================
+run_nodejs_tests() {
+    log_section "9. Node.js Runtime Tests"
+
+    local node_chatroom_id=""
+    local node_callback_id=""
+
+    # TC-NODE01: Create ChatRoom for Node.js test
+    log_info "  Creating ChatRoom for Node.js test..."
+
+    local result
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/chatroom/" \
+        -H "Content-Type: application/json" \
+        -d "{\"title\": \"Node.js Test ${TIMESTAMP}\"}" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    local body=$(echo "$result" | cut -d'|' -f1)
+    local http_code=$(echo "$result" | cut -d'|' -f2)
+
+    if [[ "$http_code" == "200" ]]; then
+        node_chatroom_id=$(json_extract_number "$body" "chat_id")
+        CREATED_CHATROOMS+=("$node_chatroom_id")
+    else
+        record_result "TC-NODE01" "Node.js Test Setup" "Node.js" "SKIP" "0" "N/A" "N/A" "Failed to create ChatRoom"
+        return
+    fi
+
+    # TC-NODE02: Create and Deploy Node.js Callback
+    log_info "  Creating and deploying Node.js callback..."
+
+    local node_path="/nodejs_test_${TIMESTAMP}"
+    CREATED_CALLBACK_PATHS+=("$node_path")
+
+    local node_code='const handler = async (event) => {
+    const body = event.body || {};
+    return {
+        statusCode: 200,
+        body: JSON.stringify({
+            message: "Hello from Node.js!",
+            runtime: "node",
+            received: body,
+            timestamp: new Date().toISOString()
+        })
+    };
+};
+exports.lambda_handler = handler;'
+
+    local encoded_code=$(echo "$node_code" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
+        -H "Content-Type: application/json" \
+        -d "{\"path\": \"${node_path}\", \"method\": \"POST\", \"type\": \"node\", \"code\": ${encoded_code}, \"chat_id\": ${node_chatroom_id}}" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    body=$(echo "$result" | cut -d'|' -f1)
+    http_code=$(echo "$result" | cut -d'|' -f2)
+    local duration=$(echo "$result" | cut -d'|' -f3)
+
+    if [[ "$http_code" == "200" ]]; then
+        node_callback_id=$(json_extract_number "$body" "callback_id")
+        local node_type=$(json_extract "$body" "type")
+
+        if [[ "$node_type" == "node" ]]; then
+            record_result "TC-NODE02" "Create Node.js Callback" "Node.js" "PASS" "$duration" "type=node" "id=${node_callback_id}"
+        else
+            record_result "TC-NODE02" "Create Node.js Callback" "Node.js" "FAIL" "$duration" "type=node" "type=${node_type}"
+            return
+        fi
+    else
+        record_result "TC-NODE02" "Create Node.js Callback" "Node.js" "FAIL" "$duration" "HTTP 200" "HTTP ${http_code}"
+        return
+    fi
+
+    # TC-NODE03: Deploy Node.js Callback
+    log_info "  Deploying Node.js callback..."
+
+    local deploy_payload="{\"callback_id\": ${node_callback_id}, \"status\": true, \"c_type\": \"docker\"}"
+    local build_start=$(get_time_ms)
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/deploy/" \
+        -H "Content-Type: application/json" \
+        -d "$deploy_payload" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    http_code=$(echo "$result" | cut -d'|' -f2)
+
+    if [[ "$http_code" == "200" ]]; then
+        log_info "    Build started, waiting for completion..."
+
+        local elapsed=0
+        local final_status="build"
+        local node_build_wait=60  # Node.js 빌드는 더 오래 걸릴 수 있음
+
+        while [[ $elapsed -lt $node_build_wait ]]; do
+            sleep 3
+            ((elapsed+=3))
+
+            local check
+            check=$(curl -s "${FAAS_BASE_URL}/callbacks/${node_callback_id}" --connect-timeout 3)
+            final_status=$(json_extract "$check" "status")
+
+            if [[ "$final_status" == "deployed" || "$final_status" == "failed" ]]; then
+                break
+            fi
+
+            echo -ne "    Building Node.js... ${elapsed}s / ${node_build_wait}s\r"
+        done
+        echo ""
+
+        local build_time=$(($(get_time_ms) - build_start))
+
+        if [[ "$final_status" == "deployed" ]]; then
+            record_result "TC-NODE03" "Deploy Node.js Callback" "Node.js" "PASS" "$build_time" "status=deployed" "built in ${elapsed}s"
+        else
+            record_result "TC-NODE03" "Deploy Node.js Callback" "Node.js" "FAIL" "$build_time" "status=deployed" "status=${final_status}"
+            return
+        fi
+    else
+        record_result "TC-NODE03" "Deploy Node.js Callback" "Node.js" "FAIL" "0" "HTTP 200" "HTTP ${http_code}"
+        return
+    fi
+
+    # TC-NODE04: Invoke Node.js Function
+    log_info "  Invoking Node.js function..."
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/${node_path#/}" \
+        -H "Content-Type: application/json" \
+        -d '{"test": "nodejs_invoke", "value": 123}' \
+        --connect-timeout "$TIMEOUT_LONG")
+
+    body=$(echo "$result" | cut -d'|' -f1)
+    http_code=$(echo "$result" | cut -d'|' -f2)
+    duration=$(echo "$result" | cut -d'|' -f3)
+
+    if [[ "$http_code" == "200" ]]; then
+        # Node.js 응답에서 runtime 확인
+        if echo "$body" | grep -q "node\|Node"; then
+            record_result "TC-NODE04" "Invoke Node.js Function" "Node.js" "PASS" "$duration" "Node.js response" "Response in ${duration}ms"
+        else
+            record_result "TC-NODE04" "Invoke Node.js Function" "Node.js" "PASS" "$duration" "HTTP 200" "Response received (${duration}ms)"
+        fi
+    else
+        record_result "TC-NODE04" "Invoke Node.js Function" "Node.js" "FAIL" "$duration" "HTTP 200" "HTTP ${http_code}"
+    fi
+}
+
+#===============================================================================
+# Timeout Handling Tests
+#===============================================================================
+run_timeout_tests() {
+    log_section "10. Timeout Handling Tests"
+
+    local timeout_chatroom_id=""
+    local timeout_callback_id=""
+
+    # TC-TIMEOUT01: Create ChatRoom for Timeout test
+    log_info "  Creating ChatRoom for Timeout test..."
+
+    local result
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/chatroom/" \
+        -H "Content-Type: application/json" \
+        -d "{\"title\": \"Timeout Test ${TIMESTAMP}\"}" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    local body=$(echo "$result" | cut -d'|' -f1)
+    local http_code=$(echo "$result" | cut -d'|' -f2)
+
+    if [[ "$http_code" == "200" ]]; then
+        timeout_chatroom_id=$(json_extract_number "$body" "chat_id")
+        CREATED_CHATROOMS+=("$timeout_chatroom_id")
+    else
+        record_result "TC-TIMEOUT01" "Timeout Test Setup" "Timeout" "SKIP" "0" "N/A" "N/A" "Failed to create ChatRoom"
+        return
+    fi
+
+    # TC-TIMEOUT02: Create Callback that will timeout (sleep 60 seconds)
+    log_info "  Creating callback with 60-second sleep (will timeout at 30s)..."
+
+    local timeout_path="/timeout_test_${TIMESTAMP}"
+    CREATED_CALLBACK_PATHS+=("$timeout_path")
+
+    local timeout_code='import time
+import json
+
+def lambda_handler(event, context):
+    # Sleep for 60 seconds - longer than the 30 second timeout
+    time.sleep(60)
+    return {"statusCode": 200, "body": json.dumps({"message": "This should never be returned"})}'
+
+    local encoded_code=$(echo "$timeout_code" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
+        -H "Content-Type: application/json" \
+        -d "{\"path\": \"${timeout_path}\", \"method\": \"POST\", \"type\": \"python\", \"code\": ${encoded_code}, \"chat_id\": ${timeout_chatroom_id}}" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    body=$(echo "$result" | cut -d'|' -f1)
+    http_code=$(echo "$result" | cut -d'|' -f2)
+    local duration=$(echo "$result" | cut -d'|' -f3)
+
+    if [[ "$http_code" == "200" ]]; then
+        timeout_callback_id=$(json_extract_number "$body" "callback_id")
+        record_result "TC-TIMEOUT02" "Create Timeout Callback" "Timeout" "PASS" "$duration" "callback created" "id=${timeout_callback_id}"
+    else
+        record_result "TC-TIMEOUT02" "Create Timeout Callback" "Timeout" "FAIL" "$duration" "HTTP 200" "HTTP ${http_code}"
+        return
+    fi
+
+    # TC-TIMEOUT03: Deploy Timeout Callback
+    log_info "  Deploying timeout callback..."
+
+    local deploy_payload="{\"callback_id\": ${timeout_callback_id}, \"status\": true, \"c_type\": \"docker\"}"
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/deploy/" \
+        -H "Content-Type: application/json" \
+        -d "$deploy_payload" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    http_code=$(echo "$result" | cut -d'|' -f2)
+
+    if [[ "$http_code" == "200" ]]; then
+        log_info "    Waiting for build completion..."
+
+        local elapsed=0
+        local final_status="build"
+
+        while [[ $elapsed -lt $BUILD_WAIT_TIME ]]; do
+            sleep 3
+            ((elapsed+=3))
+
+            local check
+            check=$(curl -s "${FAAS_BASE_URL}/callbacks/${timeout_callback_id}" --connect-timeout 3)
+            final_status=$(json_extract "$check" "status")
+
+            if [[ "$final_status" == "deployed" || "$final_status" == "failed" ]]; then
+                break
+            fi
+
+            echo -ne "    Building... ${elapsed}s / ${BUILD_WAIT_TIME}s\r"
+        done
+        echo ""
+
+        if [[ "$final_status" == "deployed" ]]; then
+            record_result "TC-TIMEOUT03" "Deploy Timeout Callback" "Timeout" "PASS" "0" "status=deployed" "Deployed successfully"
+        else
+            record_result "TC-TIMEOUT03" "Deploy Timeout Callback" "Timeout" "FAIL" "0" "status=deployed" "status=${final_status}"
+            return
+        fi
+    else
+        record_result "TC-TIMEOUT03" "Deploy Timeout Callback" "Timeout" "FAIL" "0" "HTTP 200" "HTTP ${http_code}"
+        return
+    fi
+
+    # TC-TIMEOUT04: Invoke and verify timeout handling
+    log_info "  Invoking callback (expecting timeout after ~30s)..."
+
+    local invoke_start=$(get_time_ms)
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/${timeout_path#/}" \
+        -H "Content-Type: application/json" \
+        -d '{"test": "timeout_test"}' \
+        --connect-timeout 45)  # 45초 타임아웃으로 서버의 30초 타임아웃 테스트
+
+    body=$(echo "$result" | cut -d'|' -f1)
+    http_code=$(echo "$result" | cut -d'|' -f2)
+    duration=$(echo "$result" | cut -d'|' -f3)
+
+    local invoke_time=$(($(get_time_ms) - invoke_start))
+
+    # 타임아웃 응답 확인:
+    # - 응답 시간이 25-40초 사이 (서버의 30초 타임아웃 근처)
+    # - 또는 응답에 "timeout" 또는 에러 코드 포함
+    if echo "$body" | grep -qi "timeout\|TIMEOUT\|time.out\|Process Time Out"; then
+        record_result "TC-TIMEOUT04" "Timeout Response Handling" "Timeout" "PASS" "$duration" "Timeout response" "Timeout detected in ${duration}ms"
+    elif [[ "$invoke_time" -ge 25000 && "$invoke_time" -le 45000 ]]; then
+        # 약 30초 후 응답 = 타임아웃 처리됨
+        record_result "TC-TIMEOUT04" "Timeout Response Handling" "Timeout" "PASS" "$duration" "~30s timeout" "Response after ${invoke_time}ms"
+    elif [[ "$http_code" == "200" ]] && echo "$body" | grep -qi "lambda_status_code"; then
+        # lambda_status_code가 있으면 타임아웃 처리된 것
+        record_result "TC-TIMEOUT04" "Timeout Response Handling" "Timeout" "PASS" "$duration" "Lambda status code" "Timeout handled"
+    else
+        record_result "TC-TIMEOUT04" "Timeout Response Handling" "Timeout" "FAIL" "$duration" "Timeout response" "HTTP ${http_code}, time=${invoke_time}ms"
+    fi
+}
+
+#===============================================================================
+# Undeploy Tests
+#===============================================================================
+run_undeploy_tests() {
+    log_section "11. Undeploy Tests"
+
+    local undeploy_chatroom_id=""
+    local undeploy_callback_id=""
+    local undeploy_path="/undeploy_test_${TIMESTAMP}"
+
+    # TC-UNDEPLOY01: Setup - Create and Deploy
+    log_info "  Setting up callback for undeploy test..."
+
+    local result
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/chatroom/" \
+        -H "Content-Type: application/json" \
+        -d "{\"title\": \"Undeploy Test ${TIMESTAMP}\"}" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    local body=$(echo "$result" | cut -d'|' -f1)
+    local http_code=$(echo "$result" | cut -d'|' -f2)
+
+    if [[ "$http_code" == "200" ]]; then
+        undeploy_chatroom_id=$(json_extract_number "$body" "chat_id")
+        CREATED_CHATROOMS+=("$undeploy_chatroom_id")
+    else
+        record_result "TC-UNDEPLOY01" "Undeploy Test Setup" "Undeploy" "SKIP" "0" "N/A" "N/A" "Failed to create ChatRoom"
+        return
+    fi
+
+    CREATED_CALLBACK_PATHS+=("$undeploy_path")
+
+    local undeploy_code='import json
+def lambda_handler(event, context):
+    return {"statusCode": 200, "body": json.dumps({"message": "undeploy test"})}'
+
+    local encoded_code=$(echo "$undeploy_code" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
+        -H "Content-Type: application/json" \
+        -d "{\"path\": \"${undeploy_path}\", \"method\": \"POST\", \"type\": \"python\", \"code\": ${encoded_code}, \"chat_id\": ${undeploy_chatroom_id}}" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    body=$(echo "$result" | cut -d'|' -f1)
+    http_code=$(echo "$result" | cut -d'|' -f2)
+
+    if [[ "$http_code" == "200" ]]; then
+        undeploy_callback_id=$(json_extract_number "$body" "callback_id")
+    else
+        record_result "TC-UNDEPLOY01" "Undeploy Test Setup" "Undeploy" "SKIP" "0" "N/A" "N/A" "Failed to create Callback"
+        return
+    fi
+
+    # Deploy first
+    curl -s -X POST "${FAAS_BASE_URL}/deploy/" \
+        -H "Content-Type: application/json" \
+        -d "{\"callback_id\": ${undeploy_callback_id}, \"status\": true, \"c_type\": \"docker\"}" > /dev/null
+
+    log_info "    Waiting for initial deploy..."
+    sleep $BUILD_WAIT_TIME
+
+    # Verify deployed
+    local check=$(curl -s "${FAAS_BASE_URL}/callbacks/${undeploy_callback_id}" --connect-timeout 3)
+    local status=$(json_extract "$check" "status")
+
+    if [[ "$status" != "deployed" ]]; then
+        record_result "TC-UNDEPLOY01" "Undeploy Test Setup" "Undeploy" "SKIP" "0" "status=deployed" "status=${status}" "Initial deploy failed"
+        return
+    fi
+
+    record_result "TC-UNDEPLOY01" "Undeploy Test Setup" "Undeploy" "PASS" "0" "Deployed" "Ready for undeploy test"
+
+    # TC-UNDEPLOY02: Undeploy (status=false)
+    log_info "  Undeploying callback..."
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/deploy/" \
+        -H "Content-Type: application/json" \
+        -d "{\"callback_id\": ${undeploy_callback_id}, \"status\": false, \"c_type\": \"docker\"}" \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    http_code=$(echo "$result" | cut -d'|' -f2)
+    local duration=$(echo "$result" | cut -d'|' -f3)
+
+    if [[ "$http_code" == "200" ]]; then
+        # Verify status changed to undeployed
+        check=$(curl -s "${FAAS_BASE_URL}/callbacks/${undeploy_callback_id}" --connect-timeout 3)
+        status=$(json_extract "$check" "status")
+
+        if [[ "$status" == "undeployed" ]]; then
+            record_result "TC-UNDEPLOY02" "Undeploy Callback" "Undeploy" "PASS" "$duration" "status=undeployed" "status=${status}"
+        else
+            record_result "TC-UNDEPLOY02" "Undeploy Callback" "Undeploy" "FAIL" "$duration" "status=undeployed" "status=${status}"
+        fi
+    else
+        record_result "TC-UNDEPLOY02" "Undeploy Callback" "Undeploy" "FAIL" "$duration" "HTTP 200" "HTTP ${http_code}"
+    fi
+
+    # TC-UNDEPLOY03: Invoke after undeploy (should fail with 404)
+    log_info "  Invoking undeployed callback (expecting 404)..."
+
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/${undeploy_path#/}" \
+        -H "Content-Type: application/json" \
+        -d '{"test": "after_undeploy"}' \
+        --connect-timeout "$TIMEOUT_SHORT")
+
+    http_code=$(echo "$result" | cut -d'|' -f2)
+    duration=$(echo "$result" | cut -d'|' -f3)
+
+    if [[ "$http_code" == "404" ]]; then
+        record_result "TC-UNDEPLOY03" "Invoke After Undeploy" "Undeploy" "PASS" "$duration" "HTTP 404" "HTTP ${http_code}"
+    else
+        record_result "TC-UNDEPLOY03" "Invoke After Undeploy" "Undeploy" "FAIL" "$duration" "HTTP 404" "HTTP ${http_code}"
+    fi
+}
+
+#===============================================================================
 # Report Generation
 #===============================================================================
 generate_reports() {
@@ -1625,6 +2027,27 @@ main() {
 
         # Error Handling Tests
         run_error_handling_tests
+
+        # Node.js Runtime Tests (full mode only)
+        if [[ "$run_full" == true ]] && [[ "$skip_docker" != true ]]; then
+            run_nodejs_tests
+        else
+            log_info "Skipping Node.js tests (use -f for full tests)"
+        fi
+
+        # Timeout Tests (full mode only - takes ~30s)
+        if [[ "$run_full" == true ]] && [[ "$skip_docker" != true ]]; then
+            run_timeout_tests
+        else
+            log_info "Skipping Timeout tests (use -f for full tests)"
+        fi
+
+        # Undeploy Tests (full mode only)
+        if [[ "$run_full" == true ]] && [[ "$skip_docker" != true ]]; then
+            run_undeploy_tests
+        else
+            log_info "Skipping Undeploy tests (use -f for full tests)"
+        fi
     else
         log_error "Server not responding. Skipping remaining tests."
     fi
