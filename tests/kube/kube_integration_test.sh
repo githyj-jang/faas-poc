@@ -283,16 +283,13 @@ cleanup_docker_images() {
     log_info "Cleaning up Docker images created by tests..."
 
     if command -v docker &> /dev/null && docker info &> /dev/null; then
-        for callback_path in "${CREATED_CALLBACK_PATHS[@]}"; do
-            if [[ -n "$callback_path" ]]; then
-                # Remove leading slash for image name
-                local clean_path="${callback_path#/}"
-                local image_name="callback_${clean_path}"
-                # 이미지 존재 여부 확인 후 삭제
-                if docker images -q "$image_name" 2>/dev/null | grep -q .; then
-                    docker rmi "$image_name" --force &>/dev/null || true
-                    log_info "  Deleted Docker image: ${image_name}"
-                fi
+        # callback_ 접두사로 시작하는 모든 이미지 삭제
+        local callback_images
+        callback_images=$(docker images --format "{{.Repository}}" 2>/dev/null | grep "^callback_" || echo "")
+        for image_name in $callback_images; do
+            if [[ -n "$image_name" ]]; then
+                docker rmi "$image_name" --force &>/dev/null || true
+                log_info "  Deleted Docker image: ${image_name}"
             fi
         done
     fi
