@@ -11,6 +11,16 @@ from app.utils.docker_utils import (
 )
 from app.utils.kube_utils import build_kube_callback_image
 
+# API 캐시 클리어 함수 임포트를 위한 lazy import 사용
+# (순환 임포트 방지)
+def _clear_api_caches():
+    """API 캐시 클리어"""
+    try:
+        from app.routers.api import clear_api_caches
+        clear_api_caches()
+    except ImportError:
+        pass
+
 router = APIRouter(prefix="/deploy", tags=["deploy"])
 
 # { "path": { "METHOD": "image_name" } }
@@ -53,6 +63,8 @@ async def deploy_callback_docker(
             if not callback_map[callback.path]:
                 del callback_map[callback.path]
         CallbackRepository.update_callback(db, req.callback_id, status="undeployed")
+        # 캐시 클리어
+        _clear_api_caches()
         return callback
 
     # 상태를 'build'로 변경
@@ -125,6 +137,9 @@ async def _build_and_register_callback(
             CallbackRepository.update_callback(
                 db, callback_id, status="deployed"
             )
+            
+            # 캐시 클리어
+            _clear_api_caches()
         else:
             # 빌드 실패: 상태를 'failed'로 변경
             CallbackRepository.update_callback(db, callback_id, status="failed")

@@ -17,6 +17,17 @@ from app.models.callback_model import (
 )
 from app.repositories.callback_repo import CallbackRepository
 
+# API 캐시 클리어 함수 임포트를 위한 lazy import 사용
+# (순환 임포트 방지)
+def _clear_api_caches():
+    """API 캐시 클리어"""
+    try:
+        from app.routers.api import clear_api_caches
+        print("Cache clear")
+        clear_api_caches()
+    except ImportError:
+        pass
+
 router = APIRouter(prefix="/callbacks", tags=["callbacks"])
 
 @router.post("/", response_model=CallbackResponse)
@@ -134,8 +145,11 @@ async def update_callback(
             update_data["env"] = req.env
 
         callback = CallbackRepository.update_callback(db, callback_id, **update_data)
+        _clear_api_caches()
+
         if not callback:
             raise HTTPException(status_code=404, detail="Callback not found")
+
         return callback
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -189,6 +203,8 @@ async def delete_callback(
         del callback_map[callback.path][callback.method]
         if not callback_map[callback.path]:
             del callback_map[callback.path]
+        
+        _clear_api_caches()
 
     if not success:
         raise HTTPException(status_code=404, detail="Callback not found")

@@ -210,7 +210,7 @@ async def build_callback_image_background(
             return {"status": "failed", "error": error_msg}
 
         await broadcast(
-            {"type": "status", "type": "success", "message": "Build completed ✅"}
+            {"type": "status", "status": "success", "message": "Build completed ✅"}
         )
 
         return {"status": "success", "image": image_name}
