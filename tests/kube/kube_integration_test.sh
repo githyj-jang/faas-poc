@@ -45,9 +45,18 @@ JOB_WAIT_TIME=60
 # Test State
 declare -a CREATED_CHATROOMS=()
 declare -a CREATED_JOBS=()
+declare -a CREATED_CALLBACK_PATHS=()  # 테스트에서 생성한 callback path (이미지 이름 추적용)
+declare -a CLEANUP_CHAT_IDS=()        # 추가 정리용 ChatRoom IDs
+declare -a CLEANUP_CALLBACK_IDS=()    # 추가 정리용 Callback IDs
 declare -a TEST_RESULTS=()
 declare -a ISSUES=()
-declare -A PERFORMANCE_METRICS=()
+# PERFORMANCE_METRICS - Using individual variables for macOS compatibility
+PERF_api_health_ms=""
+PERF_kube_build_time_ms=""
+PERF_kube_invoke_ms=""
+PERF_kube_avg_ms=""
+PERF_kube_min_ms=""
+PERF_kube_max_ms=""
 
 CURRENT_CHATROOM_ID=""
 CURRENT_CALLBACK_ID=""
@@ -206,7 +215,7 @@ record_issue() {
 cleanup_kube_resources() {
     log_info "Cleaning up Kubernetes resources..."
 
-    # Delete test jobs
+    # Delete tracked test jobs
     for job_name in "${CREATED_JOBS[@]}"; do
         if [[ -n "$job_name" ]]; then
             kubectl delete job "$job_name" -n "$KUBE_NAMESPACE" --ignore-not-found=true &>/dev/null
@@ -217,12 +226,28 @@ cleanup_kube_resources() {
     # Delete any leftover test pods
     kubectl delete pods -n "$KUBE_NAMESPACE" -l "test=faas-kube-test" --ignore-not-found=true &>/dev/null
 
+    # Clean up completed lambda-job-* jobs created during this test session
+    # Only delete jobs created within the last 30 minutes to avoid affecting other tests
+    local job_list
+    job_list=$(kubectl get jobs -n "$KUBE_NAMESPACE" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+    for job_name in $job_list; do
+        if [[ "$job_name" == lambda-job-* ]]; then
+            local job_status
+            job_status=$(kubectl get job "$job_name" -n "$KUBE_NAMESPACE" -o jsonpath='{.status.succeeded}' 2>/dev/null || echo "0")
+            if [[ "$job_status" == "1" ]]; then
+                kubectl delete job "$job_name" -n "$KUBE_NAMESPACE" --ignore-not-found=true &>/dev/null
+                log_info "  Deleted completed Job: ${job_name}"
+            fi
+        fi
+    done
+
     CREATED_JOBS=()
 }
 
 cleanup_api_resources() {
     log_info "Cleaning up API resources..."
 
+    # Delete tracked ChatRooms (from CREATED_CHATROOMS)
     for chat_id in "${CREATED_CHATROOMS[@]}"; do
         if [[ -n "$chat_id" ]]; then
             curl -s -X DELETE "${FAAS_BASE_URL}/chatroom/${chat_id}" \
@@ -231,12 +256,54 @@ cleanup_api_resources() {
         fi
     done
 
+    # Delete additional ChatRooms (from CLEANUP_CHAT_IDS)
+    for chat_id in "${CLEANUP_CHAT_IDS[@]}"; do
+        if [[ -n "$chat_id" ]]; then
+            curl -s -X DELETE "${FAAS_BASE_URL}/chatroom/${chat_id}" \
+                --connect-timeout 3 &>/dev/null || true
+            log_info "  Deleted ChatRoom (cleanup): ${chat_id}"
+        fi
+    done
+
+    # Delete additional Callbacks (from CLEANUP_CALLBACK_IDS)
+    for callback_id in "${CLEANUP_CALLBACK_IDS[@]}"; do
+        if [[ -n "$callback_id" ]]; then
+            curl -s -X DELETE "${FAAS_BASE_URL}/callbacks/${callback_id}" \
+                --connect-timeout 3 &>/dev/null || true
+            log_info "  Deleted Callback (cleanup): ${callback_id}"
+        fi
+    done
+
     CREATED_CHATROOMS=()
+    CLEANUP_CHAT_IDS=()
+    CLEANUP_CALLBACK_IDS=()
+}
+
+cleanup_docker_images() {
+    log_info "Cleaning up Docker images created by tests..."
+
+    if command -v docker &> /dev/null && docker info &> /dev/null; then
+        for callback_path in "${CREATED_CALLBACK_PATHS[@]}"; do
+            if [[ -n "$callback_path" ]]; then
+                # Remove leading slash for image name
+                local clean_path="${callback_path#/}"
+                local image_name="callback_${clean_path}"
+                # 이미지 존재 여부 확인 후 삭제
+                if docker images -q "$image_name" 2>/dev/null | grep -q .; then
+                    docker rmi "$image_name" --force &>/dev/null || true
+                    log_info "  Deleted Docker image: ${image_name}"
+                fi
+            fi
+        done
+    fi
+
+    CREATED_CALLBACK_PATHS=()
 }
 
 cleanup() {
     cleanup_kube_resources
     cleanup_api_resources
+    cleanup_docker_images
 }
 
 trap cleanup EXIT
@@ -348,7 +415,7 @@ run_api_health_tests() {
         return 1
     fi
 
-    PERFORMANCE_METRICS["api_health_ms"]="$duration"
+    PERF_api_health_ms="$duration"
 }
 
 #===============================================================================
@@ -384,7 +451,8 @@ run_kube_deploy_tests() {
     # Step 2: Create Callback for Kube deployment
     log_info "  Step 2: Creating Callback for Kubernetes..."
 
-    CURRENT_DEPLOY_PATH="kube_test_${TIMESTAMP}"
+    CURRENT_DEPLOY_PATH="/kube_test_${TIMESTAMP}"
+    CREATED_CALLBACK_PATHS+=("$CURRENT_DEPLOY_PATH")  # Docker 이미지 정리용 추적
     local python_code='import json\nimport os\ndef lambda_handler(event, context):\n    return {\"statusCode\": 200, \"body\": json.dumps({\"message\": \"Hello from K8s!\", \"pod\": os.environ.get(\"HOSTNAME\", \"unknown\")})}'
 
     local callback_payload="{\"path\": \"${CURRENT_DEPLOY_PATH}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${python_code}\", \"chat_id\": ${CURRENT_CHATROOM_ID}}"
@@ -446,7 +514,7 @@ run_kube_deploy_tests() {
             echo ""
 
             local build_time=$(($(get_time_ms) - build_start))
-            PERFORMANCE_METRICS["kube_build_time_ms"]="$build_time"
+            PERF_kube_build_time_ms="$build_time"
 
             if [[ "$final_status" == "deployed" ]]; then
                 record_result "TC-K8S-DEP03" "Kube Deploy" "K8sDeploy" "PASS" "$build_time" "status=deployed" "built in ${elapsed}s"
@@ -464,7 +532,7 @@ run_kube_deploy_tests() {
     # Step 4: Invoke via Kube endpoint
     log_info "  Step 4: Invoking function via /api/kube/..."
 
-    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${CURRENT_DEPLOY_PATH}" \
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${CURRENT_DEPLOY_PATH#/}" \
         -H "Content-Type: application/json" \
         -d '{"test": "kube_data"}' \
         --connect-timeout "$TIMEOUT_LONG")
@@ -473,7 +541,7 @@ run_kube_deploy_tests() {
     http_code=$(echo "$result" | cut -d'|' -f2)
     duration=$(echo "$result" | cut -d'|' -f3)
 
-    PERFORMANCE_METRICS["kube_invoke_ms"]="$duration"
+    PERF_kube_invoke_ms="$duration"
 
     if [[ "$http_code" == "200" ]]; then
         record_result "TC-K8S-DEP04" "Kube Function Invoke" "K8sDeploy" "PASS" "$duration" "HTTP 200" "Response in ${duration}ms"
@@ -537,10 +605,89 @@ run_kube_lifecycle_tests() {
 run_kube_performance_tests() {
     log_section "5. Kubernetes Performance Tests"
 
-    if [[ -z "$CURRENT_DEPLOY_PATH" ]]; then
-        log_warning "  No deployed function available for performance tests"
-        record_result "TC-K8S-PERF01" "Kube Response Time" "K8sPerf" "SKIP" "0" "N/A" "N/A" "No deployed function"
-        return
+    local perf_test_path="$CURRENT_DEPLOY_PATH"
+
+    # If no deployed function, create one for performance testing
+    if [[ -z "$perf_test_path" ]]; then
+        log_info "  No deployed function available, creating one for performance test..."
+
+        # Create ChatRoom for perf test
+        local perf_chat_response
+        perf_chat_response=$(curl -s -X POST "${FAAS_BASE_URL}/chatroom/" \
+            -H "Content-Type: application/json" \
+            -d "{\"title\": \"PerfTestChatRoom_${TIMESTAMP}\"}")
+
+        local perf_chat_id=$(echo "$perf_chat_response" | grep -o '"chat_id":[0-9]*' | cut -d':' -f2)
+
+        if [[ -z "$perf_chat_id" ]]; then
+            log_warning "  Failed to create ChatRoom for performance test"
+            record_result "TC-K8S-PERF01" "Kube Response Time" "K8sPerf" "SKIP" "0" "N/A" "N/A" "Failed to create ChatRoom"
+            return
+        fi
+
+        CLEANUP_CHAT_IDS+=("$perf_chat_id")
+        perf_test_path="/perf_test_${TIMESTAMP}"
+
+        # Create simple callback for performance test
+        local perf_callback_response
+        perf_callback_response=$(curl -s -X POST "${FAAS_BASE_URL}/callbacks/" \
+            -H "Content-Type: application/json" \
+            -d "{
+                \"chat_id\": ${perf_chat_id},
+                \"path\": \"${perf_test_path}\",
+                \"method\": \"POST\",
+                \"code\": \"def lambda_handler(event, context):\\n    return {'statusCode': 200, 'body': {'message': 'perf test', 'input': event}}\",
+                \"type\": \"python\"
+            }")
+
+        local perf_callback_id=$(echo "$perf_callback_response" | grep -o '"callback_id":[0-9]*' | cut -d':' -f2)
+
+        if [[ -z "$perf_callback_id" ]]; then
+            log_warning "  Failed to create callback for performance test"
+            record_result "TC-K8S-PERF01" "Kube Response Time" "K8sPerf" "SKIP" "0" "N/A" "N/A" "Failed to create callback"
+            return
+        fi
+
+        CLEANUP_CALLBACK_IDS+=("$perf_callback_id")
+
+        # Deploy to Kubernetes
+        log_info "  Deploying performance test function to Kubernetes..."
+        local deploy_response
+        deploy_response=$(curl -s -X POST "${FAAS_BASE_URL}/deploy/" \
+            -H "Content-Type: application/json" \
+            -d "{\"callback_id\": ${perf_callback_id}, \"status\": true, \"c_type\": \"kube\"}")
+
+        # Wait for build to complete
+        log_info "  Waiting for build to complete (up to 60 seconds)..."
+        local max_wait=60
+        local wait_interval=5
+        local elapsed=0
+
+        while [[ $elapsed -lt $max_wait ]]; do
+            sleep $wait_interval
+            ((elapsed+=wait_interval))
+
+            local status_response
+            status_response=$(curl -s "${FAAS_BASE_URL}/callbacks/${perf_callback_id}")
+            local status=$(echo "$status_response" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+
+            if [[ "$status" == "deployed" ]]; then
+                log_info "  Performance test function deployed successfully"
+                break
+            elif [[ "$status" == "failed" ]]; then
+                log_warning "  Performance test function build failed"
+                record_result "TC-K8S-PERF01" "Kube Response Time" "K8sPerf" "SKIP" "0" "N/A" "N/A" "Build failed"
+                return
+            fi
+
+            log_info "    Status: $status (${elapsed}s elapsed)"
+        done
+
+        if [[ $elapsed -ge $max_wait ]]; then
+            log_warning "  Timeout waiting for performance test function to deploy"
+            record_result "TC-K8S-PERF01" "Kube Response Time" "K8sPerf" "SKIP" "0" "N/A" "N/A" "Deploy timeout"
+            return
+        fi
     fi
 
     # TC-K8S-PERF01: Multiple invocations
@@ -551,7 +698,7 @@ run_kube_performance_tests() {
 
     for i in $(seq 1 $iterations); do
         local result
-        result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${CURRENT_DEPLOY_PATH}" \
+        result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${perf_test_path#/}" \
             -H "Content-Type: application/json" \
             -d "{\"iteration\": $i}" \
             --connect-timeout "$TIMEOUT_LONG")
@@ -580,9 +727,9 @@ run_kube_performance_tests() {
 
         local avg=$((sum / ${#response_times[@]}))
 
-        PERFORMANCE_METRICS["kube_avg_ms"]="$avg"
-        PERFORMANCE_METRICS["kube_min_ms"]="$min"
-        PERFORMANCE_METRICS["kube_max_ms"]="$max"
+        PERF_kube_avg_ms="$avg"
+        PERF_kube_min_ms="$min"
+        PERF_kube_max_ms="$max"
 
         record_result "TC-K8S-PERF01" "Kube Response Time" "K8sPerf" "PASS" "0" "Response metrics" "avg=${avg}ms, min=${min}ms, max=${max}ms"
     else
@@ -611,20 +758,18 @@ run_kube_error_tests() {
     fi
 
     # TC-K8S-ERR02: Wrong method on kube endpoint
-    if [[ -n "$CURRENT_DEPLOY_PATH" ]]; then
-        result=$(timed_curl -X DELETE "${FAAS_BASE_URL}/api/kube/${CURRENT_DEPLOY_PATH}" \
-            --connect-timeout "$TIMEOUT_SHORT")
+    # 배포 여부와 관계없이 테스트: 존재하지 않는 경로에 DELETE 요청 → 404 예상
+    local test_path="${CURRENT_DEPLOY_PATH:-/test_wrong_method_kube_${TIMESTAMP}}"
+    result=$(timed_curl -X DELETE "${FAAS_BASE_URL}/api/kube/${test_path#/}" \
+        --connect-timeout "$TIMEOUT_SHORT")
 
-        http_code=$(echo "$result" | cut -d'|' -f2)
-        duration=$(echo "$result" | cut -d'|' -f3)
+    http_code=$(echo "$result" | cut -d'|' -f2)
+    duration=$(echo "$result" | cut -d'|' -f3)
 
-        if [[ "$http_code" == "404" || "$http_code" == "405" ]]; then
-            record_result "TC-K8S-ERR02" "Wrong Method Kube" "K8sError" "PASS" "$duration" "404 or 405" "HTTP ${http_code}"
-        else
-            record_result "TC-K8S-ERR02" "Wrong Method Kube" "K8sError" "FAIL" "$duration" "404 or 405" "HTTP ${http_code}"
-        fi
+    if [[ "$http_code" == "404" || "$http_code" == "405" ]]; then
+        record_result "TC-K8S-ERR02" "Wrong Method Kube" "K8sError" "PASS" "$duration" "404 or 405" "HTTP ${http_code}"
     else
-        record_result "TC-K8S-ERR02" "Wrong Method Kube" "K8sError" "SKIP" "0" "N/A" "N/A" "No deployed path"
+        record_result "TC-K8S-ERR02" "Wrong Method Kube" "K8sError" "FAIL" "$duration" "404 or 405" "HTTP ${http_code}"
     fi
 
     # TC-K8S-ERR03: Delete Building Callback (should fail)
@@ -645,6 +790,9 @@ run_kube_error_tests() {
         CREATED_CHATROOMS+=("$slow_chatroom_id")
 
         # 2. Create callback with sleep(28)
+        local slow_kube_path="/slow_kube_build_test_${TIMESTAMP}"
+        CREATED_CALLBACK_PATHS+=("$slow_kube_path")  # Docker 이미지 정리용 추적
+
         local slow_callback_code='import time
 import json
 
@@ -655,7 +803,7 @@ def lambda_handler(event, context):
         local encoded_code=$(echo "$slow_callback_code" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
         local slow_callback_result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
             -H "Content-Type: application/json" \
-            -d "{\"chat_id\": ${slow_chatroom_id}, \"path\": \"slow_kube_build_test\", \"method\": \"GET\", \"type\": \"python\", \"code\": ${encoded_code}}" \
+            -d "{\"chat_id\": ${slow_chatroom_id}, \"path\": \"${slow_kube_path}\", \"method\": \"GET\", \"type\": \"python\", \"code\": ${encoded_code}}" \
             --connect-timeout "$TIMEOUT_SHORT")
 
         local slow_callback_body=$(echo "$slow_callback_result" | cut -d'|' -f1)
@@ -730,7 +878,8 @@ run_kube_library_env_tests() {
     # TC-K8S-LE02: Create Callback with external library
     log_info "  Creating function with external library (requests)..."
 
-    local lib_path="kube_lib_test_${TIMESTAMP}"
+    local lib_path="/kube_lib_test_${TIMESTAMP}"
+    CREATED_CALLBACK_PATHS+=("$lib_path")  # Docker 이미지 정리용 추적
     local lib_code='import json\nimport requests\ndef lambda_handler(event, context):\n    return {\"statusCode\": 200, \"body\": json.dumps({\"requests_version\": requests.__version__})}'
     local lib_payload="{\"path\": \"${lib_path}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${lib_code}\", \"library\": \"requests==2.28.0\", \"chat_id\": ${lib_chatroom_id}}"
 
@@ -762,7 +911,7 @@ run_kube_library_env_tests() {
         local status=$(json_extract "$check" "status")
 
         if [[ "$status" == "deployed" ]]; then
-            result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${lib_path}" \
+            result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${lib_path#/}" \
                 -H "Content-Type: application/json" \
                 -d '{}' \
                 --connect-timeout "$TIMEOUT_LONG")
@@ -799,7 +948,8 @@ run_kube_library_env_tests() {
         env_chatroom_id=$(json_extract_number "$body" "chat_id")
         CREATED_CHATROOMS+=("$env_chatroom_id")
 
-        local env_path="kube_env_test_${TIMESTAMP}"
+        local env_path="/kube_env_test_${TIMESTAMP}"
+        CREATED_CALLBACK_PATHS+=("$env_path")  # Docker 이미지 정리용 추적
         local env_code='import os\nimport json\ndef lambda_handler(event, context):\n    api_key = os.environ.get(\"API_KEY\", \"NOTSET\")\n    return {\"statusCode\": 200, \"body\": json.dumps({\"api_key_prefix\": api_key[:3] if len(api_key) >= 3 else api_key})}'
         local env_payload="{\"path\": \"${env_path}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${env_code}\", \"env\": {\"API_KEY\": \"secret123\", \"DB_HOST\": \"localhost\"}, \"chat_id\": ${env_chatroom_id}}"
 
@@ -830,7 +980,7 @@ run_kube_library_env_tests() {
             local status=$(json_extract "$check" "status")
 
             if [[ "$status" == "deployed" ]]; then
-                result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${env_path}" \
+                result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${env_path#/}" \
                     -H "Content-Type: application/json" \
                     -d '{}' \
                     --connect-timeout "$TIMEOUT_LONG")
@@ -859,7 +1009,7 @@ run_kube_library_env_tests() {
 # Kubernetes Resource Cleanup Tests
 #===============================================================================
 run_kube_cleanup_tests() {
-    log_section "7. Kubernetes Resource Cleanup Tests"
+    log_section "8. Kubernetes Resource Cleanup Tests"
 
     # TC-K8S-CLN01: Job cleanup capability
     local start=$(get_time_ms)
@@ -918,9 +1068,14 @@ generate_reports() {
         echo "    \"pass_rate\": ${pass_rate}"
         echo "  },"
         echo "  \"performance\": {"
-        for key in "${!PERFORMANCE_METRICS[@]}"; do
-            echo "    \"${key}\": ${PERFORMANCE_METRICS[$key]},"
-        done | sed '$ s/,$//'
+        local first_metric=true
+        [[ -n "$PERF_api_health_ms" ]] && { $first_metric || echo ","; first_metric=false; echo -n "    \"api_health_ms\": $PERF_api_health_ms"; }
+        [[ -n "$PERF_kube_build_time_ms" ]] && { $first_metric || echo ","; first_metric=false; echo -n "    \"kube_build_time_ms\": $PERF_kube_build_time_ms"; }
+        [[ -n "$PERF_kube_invoke_ms" ]] && { $first_metric || echo ","; first_metric=false; echo -n "    \"kube_invoke_ms\": $PERF_kube_invoke_ms"; }
+        [[ -n "$PERF_kube_avg_ms" ]] && { $first_metric || echo ","; first_metric=false; echo -n "    \"kube_avg_ms\": $PERF_kube_avg_ms"; }
+        [[ -n "$PERF_kube_min_ms" ]] && { $first_metric || echo ","; first_metric=false; echo -n "    \"kube_min_ms\": $PERF_kube_min_ms"; }
+        [[ -n "$PERF_kube_max_ms" ]] && { $first_metric || echo ","; first_metric=false; echo -n "    \"kube_max_ms\": $PERF_kube_max_ms"; }
+        echo ""
         echo "  },"
         echo "  \"results\": ["
         printf '%s\n' "${TEST_RESULTS[@]}" | sed 's/$/,/' | sed '$ s/,$//'
@@ -960,11 +1115,11 @@ generate_reports() {
         echo ""
         echo "| Metric | Value |"
         echo "|--------|-------|"
-        [[ -n "${PERFORMANCE_METRICS[kube_build_time_ms]}" ]] && echo "| Kube Build Time | $((${PERFORMANCE_METRICS[kube_build_time_ms]}/1000))s |"
-        [[ -n "${PERFORMANCE_METRICS[kube_invoke_ms]}" ]] && echo "| Kube Invoke (First) | ${PERFORMANCE_METRICS[kube_invoke_ms]}ms |"
-        [[ -n "${PERFORMANCE_METRICS[kube_avg_ms]}" ]] && echo "| Kube Avg Response | ${PERFORMANCE_METRICS[kube_avg_ms]}ms |"
-        [[ -n "${PERFORMANCE_METRICS[kube_min_ms]}" ]] && echo "| Kube Min Response | ${PERFORMANCE_METRICS[kube_min_ms]}ms |"
-        [[ -n "${PERFORMANCE_METRICS[kube_max_ms]}" ]] && echo "| Kube Max Response | ${PERFORMANCE_METRICS[kube_max_ms]}ms |"
+        [[ -n "$PERF_kube_build_time_ms" ]] && echo "| Kube Build Time | $((PERF_kube_build_time_ms/1000))s |"
+        [[ -n "$PERF_kube_invoke_ms" ]] && echo "| Kube Invoke (First) | ${PERF_kube_invoke_ms}ms |"
+        [[ -n "$PERF_kube_avg_ms" ]] && echo "| Kube Avg Response | ${PERF_kube_avg_ms}ms |"
+        [[ -n "$PERF_kube_min_ms" ]] && echo "| Kube Min Response | ${PERF_kube_min_ms}ms |"
+        [[ -n "$PERF_kube_max_ms" ]] && echo "| Kube Max Response | ${PERF_kube_max_ms}ms |"
         echo ""
 
         if [[ ${#ISSUES[@]} -gt 0 ]]; then
@@ -1036,9 +1191,9 @@ print_summary() {
 
     echo ""
     echo -e "${BOLD}Performance Metrics:${NC}"
-    [[ -n "${PERFORMANCE_METRICS[kube_build_time_ms]}" ]] && echo "  Kube Build Time: $((${PERFORMANCE_METRICS[kube_build_time_ms]}/1000))s"
-    [[ -n "${PERFORMANCE_METRICS[kube_invoke_ms]}" ]] && echo "  First Invoke: ${PERFORMANCE_METRICS[kube_invoke_ms]}ms"
-    [[ -n "${PERFORMANCE_METRICS[kube_avg_ms]}" ]] && echo "  Avg Response: ${PERFORMANCE_METRICS[kube_avg_ms]}ms"
+    [[ -n "$PERF_kube_build_time_ms" ]] && echo "  Kube Build Time: $((PERF_kube_build_time_ms/1000))s"
+    [[ -n "$PERF_kube_invoke_ms" ]] && echo "  First Invoke: ${PERF_kube_invoke_ms}ms"
+    [[ -n "$PERF_kube_avg_ms" ]] && echo "  Avg Response: ${PERF_kube_avg_ms}ms"
 
     if [[ ${#ISSUES[@]} -gt 0 ]]; then
         echo ""

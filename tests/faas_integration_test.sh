@@ -47,9 +47,16 @@ COLD_START_ITERATIONS=3
 # Test State - Service Flow 기반 리소스 관리
 declare -a CREATED_CHATROOMS=()      # 생성된 ChatRoom IDs (cleanup 시 사용)
 declare -a STANDALONE_CALLBACKS=()    # ChatRoom 없이 생성된 Callback IDs
+declare -a CREATED_DOCKER_IMAGES=()   # 테스트에서 생성한 Docker 이미지 이름
+declare -a CREATED_CALLBACK_PATHS=()  # 테스트에서 생성한 callback path (이미지 이름 추적용)
 declare -a TEST_RESULTS=()
 declare -a ISSUES=()
-declare -A PERFORMANCE_METRICS=()
+# PERFORMANCE_METRICS - Using individual variables for macOS compatibility
+PERF_health_response_ms=""
+PERF_build_time_ms=""
+PERF_cold_start_ms=""
+PERF_warm_call_ms=""
+PERF_avg_response_ms=""
 
 # 현재 테스트에서 사용 중인 리소스 (플로우 테스트용)
 CURRENT_CHATROOM_ID=""
@@ -242,8 +249,35 @@ cleanup() {
         fi
     done
 
+    # 3. 테스트에서 생성한 Docker 이미지만 삭제
+    if command -v docker &> /dev/null && docker info &> /dev/null; then
+        for callback_path in "${CREATED_CALLBACK_PATHS[@]}"; do
+            if [[ -n "$callback_path" ]]; then
+                # Remove leading slash for image name
+                local clean_path="${callback_path#/}"
+                local image_name="callback_${clean_path}"
+                # 이미지 존재 여부 확인 후 삭제
+                if docker images -q "$image_name" 2>/dev/null | grep -q .; then
+                    docker rmi "$image_name" --force &>/dev/null || true
+                    log_info "  Deleted Docker image: ${image_name}"
+                fi
+            fi
+        done
+
+        # Clean up test-related containers that might be stopped
+        local test_containers
+        test_containers=$(docker ps -a --filter "name=callback_" --format "{{.Names}}" 2>/dev/null || echo "")
+        for container in $test_containers; do
+            if [[ -n "$container" ]]; then
+                docker rm -f "$container" &>/dev/null || true
+                log_info "  Deleted Docker container: ${container}"
+            fi
+        done
+    fi
+
     CREATED_CHATROOMS=()
     STANDALONE_CALLBACKS=()
+    CREATED_CALLBACK_PATHS=()
 }
 
 # 시그널 핸들러
@@ -350,7 +384,7 @@ run_health_tests() {
         record_issue "Medium" "Health Check Slow" "Response time ${duration}ms exceeds SLA"
     fi
 
-    PERFORMANCE_METRICS["health_response_ms"]="$duration"
+    PERF_health_response_ms="$duration"
 }
 
 #===============================================================================
@@ -485,7 +519,8 @@ run_service_flow_tests() {
     # Step 2: Create Callback with chat_id
     log_info "  Step 2: Creating Callback linked to ChatRoom..."
 
-    CURRENT_DEPLOY_PATH="flow_test_${TIMESTAMP}"
+    CURRENT_DEPLOY_PATH="/flow_test_${TIMESTAMP}"
+    CREATED_CALLBACK_PATHS+=("$CURRENT_DEPLOY_PATH")  # Docker 이미지 정리용 추적
     local python_code='import json\ndef lambda_handler(event, context):\n    body = event.get(\"body\", {})\n    return {\"statusCode\": 200, \"body\": json.dumps({\"message\": \"Service flow works!\", \"received\": body})}'
 
     local callback_payload="{\"path\": \"${CURRENT_DEPLOY_PATH}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${python_code}\", \"chat_id\": ${CURRENT_CHATROOM_ID}}"
@@ -569,7 +604,7 @@ run_service_flow_tests() {
             echo ""
 
             local build_time=$(($(get_time_ms) - build_start))
-            PERFORMANCE_METRICS["build_time_ms"]="$build_time"
+            PERF_build_time_ms="$build_time"
 
             if [[ "$final_status" == "deployed" ]]; then
                 record_result "TC-SF04" "Deploy Callback" "ServiceFlow" "PASS" "$((build_time))" "status=deployed" "built in ${elapsed}s"
@@ -587,7 +622,7 @@ run_service_flow_tests() {
     # Step 5: Invoke Deployed Function
     log_info "  Step 5: Invoking deployed function..."
 
-    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/${CURRENT_DEPLOY_PATH}" \
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/${CURRENT_DEPLOY_PATH#/}" \
         -H "Content-Type: application/json" \
         -d '{"test": "service_flow_data"}' \
         --connect-timeout "$TIMEOUT_MEDIUM")
@@ -596,7 +631,7 @@ run_service_flow_tests() {
     http_code=$(echo "$result" | cut -d'|' -f2)
     duration=$(echo "$result" | cut -d'|' -f3)
 
-    PERFORMANCE_METRICS["cold_start_ms"]="$duration"
+    PERF_cold_start_ms="$duration"
 
     if [[ "$http_code" == "200" ]]; then
         record_result "TC-SF05" "Invoke Deployed Function" "ServiceFlow" "PASS" "$duration" "HTTP 200" "Response in ${duration}ms"
@@ -610,7 +645,7 @@ run_service_flow_tests() {
     local -a response_times=()
 
     for i in $(seq 1 $COLD_START_ITERATIONS); do
-        result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/${CURRENT_DEPLOY_PATH}" \
+        result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/${CURRENT_DEPLOY_PATH#/}" \
             -H "Content-Type: application/json" \
             -d "{\"iteration\": $i}" \
             --connect-timeout "$TIMEOUT_MEDIUM")
@@ -634,8 +669,8 @@ run_service_flow_tests() {
 
         local avg=$((sum / ${#response_times[@]}))
 
-        PERFORMANCE_METRICS["warm_call_ms"]="$min"
-        PERFORMANCE_METRICS["avg_response_ms"]="$avg"
+        PERF_warm_call_ms="$min"
+        PERF_avg_response_ms="$avg"
 
         record_result "TC-SF06" "Cold Start Analysis" "ServiceFlow" "PASS" "0" "Response metrics" "avg=${avg}ms, min=${min}ms, max=${max}ms"
     else
@@ -654,8 +689,9 @@ run_callback_crud_tests() {
     # TC-CB01: Create Callback without chat_id (standalone)
     log_info "  Testing standalone callback (without chat_id)..."
 
+    local standalone_path="/standalone_${TIMESTAMP}"
     local python_code='import json\ndef lambda_handler(event, context):\n    return {\"statusCode\": 200, \"body\": json.dumps({\"message\": \"Standalone callback\"})}'
-    local payload="{\"path\": \"standalone_${TIMESTAMP}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${python_code}\"}"
+    local payload="{\"path\": \"${standalone_path}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${python_code}\"}"
 
     local result
     result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
@@ -670,6 +706,7 @@ run_callback_crud_tests() {
     if [[ "$http_code" == "200" ]]; then
         test_callback_id=$(json_extract_number "$body" "callback_id")
         STANDALONE_CALLBACKS+=("$test_callback_id")
+        CREATED_CALLBACK_PATHS+=("$standalone_path")  # Docker 이미지 정리용 추적
         record_result "TC-CB01" "Create Standalone Callback" "Callback" "PASS" "$duration" "callback_id created" "id=${test_callback_id}"
     else
         record_result "TC-CB01" "Create Standalone Callback" "Callback" "FAIL" "$duration" "HTTP 200" "HTTP ${http_code}"
@@ -679,8 +716,9 @@ run_callback_crud_tests() {
     log_info "  Testing Node.js callback creation..."
 
     local test_node_callback_id=""
+    local node_path="/test_node_${TIMESTAMP}"
     local node_code='exports.handler = async (event) => { return { statusCode: 200, body: JSON.stringify({message: \"Hello from Node\"}) }; };'
-    payload="{\"path\": \"test_node_${TIMESTAMP}\", \"method\": \"POST\", \"type\": \"node\", \"code\": \"${node_code}\"}"
+    payload="{\"path\": \"${node_path}\", \"method\": \"POST\", \"type\": \"node\", \"code\": \"${node_code}\"}"
 
     result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
         -H "Content-Type: application/json" \
@@ -697,6 +735,7 @@ run_callback_crud_tests() {
 
         if [[ "$node_type" == "node" ]]; then
             STANDALONE_CALLBACKS+=("$test_node_callback_id")
+            CREATED_CALLBACK_PATHS+=("$node_path")  # Docker 이미지 정리용 추적
             record_result "TC-L03" "Create Node.js Callback" "Callback" "PASS" "$duration" "type=node" "id=${test_node_callback_id}, type=${node_type}"
         else
             record_result "TC-L03" "Create Node.js Callback" "Callback" "FAIL" "$duration" "type=node" "type=${node_type}" "Wrong type returned"
@@ -787,9 +826,10 @@ run_callback_crud_tests() {
         fi
     fi
 
-    # TC-CB07: Duplicate Path Creation
+    # TC-CB07: Duplicate Path Creation (같은 path로 다시 생성 시도)
     if [[ -n "$test_callback_id" ]]; then
-        payload="{\"path\": \"standalone_${TIMESTAMP}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"def lambda_handler(e, c): pass\"}"
+        # standalone_path는 /standalone_${TIMESTAMP}로 생성됨 - 동일한 path 사용
+        payload="{\"path\": \"${standalone_path}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"def lambda_handler(e, c): pass\"}"
 
         result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
             -H "Content-Type: application/json" \
@@ -858,8 +898,9 @@ run_cascade_delete_test() {
     # Step 2: Create Callback linked to ChatRoom
     log_info "  Creating Callback linked to ChatRoom..."
 
+    local cascade_path="/cascade_${TIMESTAMP}"
     local python_code='def lambda_handler(e, c): return {\"statusCode\": 200}'
-    local payload="{\"path\": \"cascade_${TIMESTAMP}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${python_code}\", \"chat_id\": ${cascade_chatroom_id}}"
+    local payload="{\"path\": \"${cascade_path}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${python_code}\", \"chat_id\": ${cascade_chatroom_id}}"
 
     result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
         -H "Content-Type: application/json" \
@@ -872,6 +913,7 @@ run_cascade_delete_test() {
 
     if [[ "$http_code" == "200" ]]; then
         cascade_callback_id=$(json_extract_number "$body" "callback_id")
+        CREATED_CALLBACK_PATHS+=("$cascade_path")  # Docker 이미지 정리용 추적
         record_result "TC-CD02" "Create Linked Callback" "CascadeDelete" "PASS" "$duration" "callback created" "id=${cascade_callback_id}"
     else
         record_result "TC-CD02" "Create Linked Callback" "CascadeDelete" "FAIL" "$duration" "HTTP 200" "HTTP ${http_code}"
@@ -947,7 +989,8 @@ run_library_env_tests() {
     # TC-LE02: Create Callback with external library
     log_info "  Creating function with external library (this may take a while)..."
 
-    local lib_path="lib_test_${TIMESTAMP}"
+    local lib_path="/lib_test_${TIMESTAMP}"
+    CREATED_CALLBACK_PATHS+=("$lib_path")  # Docker 이미지 정리용 추적
     local lib_code='import json\nimport requests\ndef lambda_handler(event, context):\n    return {\"statusCode\": 200, \"body\": json.dumps({\"requests_version\": requests.__version__})}'
     local lib_payload="{\"path\": \"${lib_path}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${lib_code}\", \"library\": \"requests==2.28.0\", \"chat_id\": ${lib_chatroom_id}}"
 
@@ -979,7 +1022,7 @@ run_library_env_tests() {
         local status=$(json_extract "$check" "status")
 
         if [[ "$status" == "deployed" ]]; then
-            result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/${lib_path}" \
+            result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/${lib_path#/}" \
                 -H "Content-Type: application/json" \
                 -d '{}' \
                 --connect-timeout "$TIMEOUT_MEDIUM")
@@ -1015,7 +1058,8 @@ run_library_env_tests() {
         env_chatroom_id=$(json_extract_number "$body" "chat_id")
         CREATED_CHATROOMS+=("$env_chatroom_id")
 
-        local env_path="env_test_${TIMESTAMP}"
+        local env_path="/env_test_${TIMESTAMP}"
+        CREATED_CALLBACK_PATHS+=("$env_path")  # Docker 이미지 정리용 추적
         local env_code='import os\nimport json\ndef lambda_handler(event, context):\n    api_key = os.environ.get(\"API_KEY\", \"NOTSET\")\n    return {\"statusCode\": 200, \"body\": json.dumps({\"api_key_prefix\": api_key[:3] if len(api_key) >= 3 else api_key})}'
         local env_payload="{\"path\": \"${env_path}\", \"method\": \"POST\", \"type\": \"python\", \"code\": \"${env_code}\", \"env\": {\"API_KEY\": \"secret123\", \"DB_HOST\": \"localhost\"}, \"chat_id\": ${env_chatroom_id}}"
 
@@ -1040,7 +1084,7 @@ run_library_env_tests() {
             log_info "    Waiting for env function build..."
             sleep $BUILD_WAIT_TIME
 
-            result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/${env_path}" \
+            result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/${env_path#/}" \
                 -H "Content-Type: application/json" \
                 -d '{}' \
                 --connect-timeout "$TIMEOUT_MEDIUM")
@@ -1078,21 +1122,19 @@ run_error_handling_tests() {
         record_result "TC-ERR01" "Nonexistent Path Call" "Error" "FAIL" "$duration" "HTTP 404" "HTTP ${http_code}"
     fi
 
-    # TC-ERR02: Wrong HTTP Method
-    if [[ -n "$CURRENT_DEPLOY_PATH" ]]; then
-        result=$(timed_curl -X DELETE "${FAAS_BASE_URL}/api/${CURRENT_DEPLOY_PATH}" \
-            --connect-timeout "$TIMEOUT_SHORT")
+    # TC-ERR02: Wrong HTTP Method (DELETE on a POST-only path or nonexistent path)
+    # 배포 여부와 관계없이 테스트: 존재하지 않는 경로에 DELETE 요청 → 404 예상
+    local test_path="${CURRENT_DEPLOY_PATH:-/test_wrong_method_${TIMESTAMP}}"
+    result=$(timed_curl -X DELETE "${FAAS_BASE_URL}/api/${test_path#/}" \
+        --connect-timeout "$TIMEOUT_SHORT")
 
-        http_code=$(echo "$result" | cut -d'|' -f2)
-        duration=$(echo "$result" | cut -d'|' -f3)
+    http_code=$(echo "$result" | cut -d'|' -f2)
+    duration=$(echo "$result" | cut -d'|' -f3)
 
-        if [[ "$http_code" == "404" || "$http_code" == "405" ]]; then
-            record_result "TC-ERR02" "Wrong HTTP Method" "Error" "PASS" "$duration" "404 or 405" "HTTP ${http_code}"
-        else
-            record_result "TC-ERR02" "Wrong HTTP Method" "Error" "FAIL" "$duration" "404 or 405" "HTTP ${http_code}"
-        fi
+    if [[ "$http_code" == "404" || "$http_code" == "405" ]]; then
+        record_result "TC-ERR02" "Wrong HTTP Method" "Error" "PASS" "$duration" "404 or 405" "HTTP ${http_code}"
     else
-        record_result "TC-ERR02" "Wrong HTTP Method" "Error" "SKIP" "0" "N/A" "N/A" "No deployed path"
+        record_result "TC-ERR02" "Wrong HTTP Method" "Error" "FAIL" "$duration" "404 or 405" "HTTP ${http_code}"
     fi
 
     # TC-ERR03: Invalid JSON Request
@@ -1141,7 +1183,12 @@ run_error_handling_tests() {
     if [[ -z "$slow_chatroom_id" || "$slow_chatroom_id" == "null" ]]; then
         record_result "TC-ERR05" "Delete Building Callback" "Error" "FAIL" "0" "HTTP 400" "ChatRoom creation failed" "Could not create chatroom"
     else
+        CREATED_CHATROOMS+=("$slow_chatroom_id")  # cleanup 추적
+
         # 2. sleep(28)을 포함하는 콜백 생성 (빌드에 28초 이상 소요)
+        local slow_build_path="/slow_build_test_${TIMESTAMP}"
+        CREATED_CALLBACK_PATHS+=("$slow_build_path")  # Docker 이미지 정리용 추적
+
         local slow_callback_code='import time
 import json
 
@@ -1152,7 +1199,7 @@ def lambda_handler(event, context):
         local encoded_code=$(echo "$slow_callback_code" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
         local slow_callback_result=$(timed_curl -X POST "${FAAS_BASE_URL}/callbacks/" \
             -H "Content-Type: application/json" \
-            -d "{\"chat_id\": ${slow_chatroom_id}, \"path\": \"slow_build_test\", \"method\": \"GET\", \"type\": \"python\", \"code\": ${encoded_code}}" \
+            -d "{\"chat_id\": ${slow_chatroom_id}, \"path\": \"${slow_build_path}\", \"method\": \"GET\", \"type\": \"python\", \"code\": ${encoded_code}}" \
             --connect-timeout "$TIMEOUT_SHORT")
 
         local slow_callback_body=$(echo "$slow_callback_result" | cut -d'|' -f1)
@@ -1194,9 +1241,8 @@ def lambda_handler(event, context):
                 fi
             fi
 
-            # 6. 정리: ChatRoom 삭제 (cascade로 callback도 삭제됨)
+            # 정리는 cleanup() 함수에서 CREATED_CHATROOMS를 통해 처리됨
             sleep 2  # 배포 정리를 위해 잠시 대기
-            curl -s -X DELETE "${FAAS_BASE_URL}/chatroom/${slow_chatroom_id}" > /dev/null 2>&1 || true
         fi
     fi
 }
@@ -1228,9 +1274,13 @@ generate_reports() {
         echo "    \"pass_rate\": ${pass_rate}"
         echo "  },"
         echo "  \"performance\": {"
-        for key in "${!PERFORMANCE_METRICS[@]}"; do
-            echo "    \"${key}\": ${PERFORMANCE_METRICS[$key]},"
-        done | sed '$ s/,$//'
+        local first_metric=true
+        [[ -n "$PERF_health_response_ms" ]] && { $first_metric || echo ","; first_metric=false; echo -n "    \"health_response_ms\": $PERF_health_response_ms"; }
+        [[ -n "$PERF_build_time_ms" ]] && { $first_metric || echo ","; first_metric=false; echo -n "    \"build_time_ms\": $PERF_build_time_ms"; }
+        [[ -n "$PERF_cold_start_ms" ]] && { $first_metric || echo ","; first_metric=false; echo -n "    \"cold_start_ms\": $PERF_cold_start_ms"; }
+        [[ -n "$PERF_warm_call_ms" ]] && { $first_metric || echo ","; first_metric=false; echo -n "    \"warm_call_ms\": $PERF_warm_call_ms"; }
+        [[ -n "$PERF_avg_response_ms" ]] && { $first_metric || echo ","; first_metric=false; echo -n "    \"avg_response_ms\": $PERF_avg_response_ms"; }
+        echo ""
         echo "  },"
         echo "  \"results\": ["
         printf '%s\n' "${TEST_RESULTS[@]}" | sed 's/$/,/' | sed '$ s/,$//'
@@ -1269,11 +1319,11 @@ generate_reports() {
         echo ""
         echo "| Metric | Value |"
         echo "|--------|-------|"
-        [[ -n "${PERFORMANCE_METRICS[cold_start_ms]}" ]] && echo "| Cold Start | ${PERFORMANCE_METRICS[cold_start_ms]}ms |"
-        [[ -n "${PERFORMANCE_METRICS[warm_call_ms]}" ]] && echo "| Warm Call | ${PERFORMANCE_METRICS[warm_call_ms]}ms |"
-        [[ -n "${PERFORMANCE_METRICS[avg_response_ms]}" ]] && echo "| Avg Response | ${PERFORMANCE_METRICS[avg_response_ms]}ms |"
-        [[ -n "${PERFORMANCE_METRICS[build_time_ms]}" ]] && echo "| Build Time | $((${PERFORMANCE_METRICS[build_time_ms]}/1000))s |"
-        [[ -n "${PERFORMANCE_METRICS[health_response_ms]}" ]] && echo "| Health Check | ${PERFORMANCE_METRICS[health_response_ms]}ms |"
+        [[ -n "$PERF_cold_start_ms" ]] && echo "| Cold Start | ${PERF_cold_start_ms}ms |"
+        [[ -n "$PERF_warm_call_ms" ]] && echo "| Warm Call | ${PERF_warm_call_ms}ms |"
+        [[ -n "$PERF_avg_response_ms" ]] && echo "| Avg Response | ${PERF_avg_response_ms}ms |"
+        [[ -n "$PERF_build_time_ms" ]] && echo "| Build Time | $((PERF_build_time_ms/1000))s |"
+        [[ -n "$PERF_health_response_ms" ]] && echo "| Health Check | ${PERF_health_response_ms}ms |"
         echo ""
 
         if [[ ${#ISSUES[@]} -gt 0 ]]; then
@@ -1349,10 +1399,10 @@ print_summary() {
 
     echo ""
     echo -e "${BOLD}Performance Metrics:${NC}"
-    [[ -n "${PERFORMANCE_METRICS[cold_start_ms]}" ]] && echo "  Cold Start: ${PERFORMANCE_METRICS[cold_start_ms]}ms"
-    [[ -n "${PERFORMANCE_METRICS[warm_call_ms]}" ]] && echo "  Warm Call: ${PERFORMANCE_METRICS[warm_call_ms]}ms"
-    [[ -n "${PERFORMANCE_METRICS[avg_response_ms]}" ]] && echo "  Avg Response: ${PERFORMANCE_METRICS[avg_response_ms]}ms"
-    [[ -n "${PERFORMANCE_METRICS[build_time_ms]}" ]] && echo "  Build Time: $((${PERFORMANCE_METRICS[build_time_ms]}/1000))s"
+    [[ -n "$PERF_cold_start_ms" ]] && echo "  Cold Start: ${PERF_cold_start_ms}ms"
+    [[ -n "$PERF_warm_call_ms" ]] && echo "  Warm Call: ${PERF_warm_call_ms}ms"
+    [[ -n "$PERF_avg_response_ms" ]] && echo "  Avg Response: ${PERF_avg_response_ms}ms"
+    [[ -n "$PERF_build_time_ms" ]] && echo "  Build Time: $((PERF_build_time_ms/1000))s"
 
     if [[ ${#ISSUES[@]} -gt 0 ]]; then
         echo ""

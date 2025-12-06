@@ -43,6 +43,7 @@ BUILD_WAIT_TIME=60
 # Test State
 declare -a CREATED_CHATROOMS=()
 declare -a CREATED_CALLBACKS=()
+declare -a CREATED_CALLBACK_PATHS=()  # 테스트에서 생성한 callback path (이미지 이름 추적용)
 declare -a TEST_RESULTS=()
 
 TOTAL_TESTS=0
@@ -219,8 +220,23 @@ cleanup() {
         fi
     done
 
+    # 테스트에서 생성한 Docker 이미지만 삭제
+    if command -v docker &> /dev/null && docker info &> /dev/null; then
+        for callback_path in "${CREATED_CALLBACK_PATHS[@]}"; do
+            if [[ -n "$callback_path" ]]; then
+                local image_name="callback_${callback_path}"
+                # 이미지 존재 여부 확인 후 삭제
+                if docker images -q "$image_name" 2>/dev/null | grep -q .; then
+                    docker rmi "$image_name" --force &>/dev/null || true
+                    log_info "  Deleted Docker image: ${image_name}"
+                fi
+            fi
+        done
+    fi
+
     CREATED_CHATROOMS=()
     CREATED_CALLBACKS=()
+    CREATED_CALLBACK_PATHS=()
 }
 
 trap cleanup EXIT
@@ -278,7 +294,8 @@ test_docker_to_kube_switch() {
     local test_start=$(get_time_ms)
     local chatroom_id=""
     local callback_id=""
-    local deploy_path="flow_docker_kube_${TIMESTAMP}"
+    local deploy_path="/flow_docker_kube_${TIMESTAMP}"
+    CREATED_CALLBACK_PATHS+=("$deploy_path")  # Docker 이미지 정리용 추적
 
     # Step 1: Create ChatRoom
     log_step "Step 1: Creating ChatRoom..."
@@ -354,7 +371,7 @@ test_docker_to_kube_switch() {
     # Step 4: Invoke via Docker endpoint
     log_step "Step 4: Verifying Docker invocation..."
 
-    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/${deploy_path}" \
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/${deploy_path#/}" \
         -H "Content-Type: application/json" \
         -d '{"test": "docker_invoke"}' \
         --connect-timeout "$TIMEOUT_LONG")
@@ -397,7 +414,7 @@ test_docker_to_kube_switch() {
     # Step 6: Invoke via Kube endpoint
     log_step "Step 6: Verifying Kube invocation..."
 
-    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${deploy_path}" \
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${deploy_path#/}" \
         -H "Content-Type: application/json" \
         -d '{"test": "kube_invoke"}' \
         --connect-timeout "$TIMEOUT_LONG")
@@ -432,7 +449,8 @@ test_kube_to_docker_switch() {
     local test_start=$(get_time_ms)
     local chatroom_id=""
     local callback_id=""
-    local deploy_path="flow_kube_docker_${TIMESTAMP}"
+    local deploy_path="/flow_kube_docker_${TIMESTAMP}"
+    CREATED_CALLBACK_PATHS+=("$deploy_path")  # Docker 이미지 정리용 추적
 
     # Step 1: Create ChatRoom
     log_step "Step 1: Creating ChatRoom..."
@@ -508,7 +526,7 @@ test_kube_to_docker_switch() {
     # Step 4: Invoke via Kube endpoint
     log_step "Step 4: Verifying Kube invocation..."
 
-    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${deploy_path}" \
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${deploy_path#/}" \
         -H "Content-Type: application/json" \
         -d '{"test": "kube_invoke"}' \
         --connect-timeout "$TIMEOUT_LONG")
@@ -551,7 +569,7 @@ test_kube_to_docker_switch() {
     # Step 6: Invoke via Docker endpoint
     log_step "Step 6: Verifying Docker invocation..."
 
-    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/${deploy_path}" \
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/${deploy_path#/}" \
         -H "Content-Type: application/json" \
         -d '{"test": "docker_invoke"}' \
         --connect-timeout "$TIMEOUT_LONG")
@@ -586,7 +604,8 @@ test_cascade_delete_kube_resources() {
     local test_start=$(get_time_ms)
     local chatroom_id=""
     local callback_id=""
-    local deploy_path="cascade_kube_${TIMESTAMP}"
+    local deploy_path="/cascade_kube_${TIMESTAMP}"
+    CREATED_CALLBACK_PATHS+=("$deploy_path")  # Docker 이미지 정리용 추적
 
     # Check if kubectl is available
     if ! command -v kubectl &>/dev/null || ! kubectl cluster-info &>/dev/null; then
@@ -672,7 +691,7 @@ test_cascade_delete_kube_resources() {
     # Step 4: Invoke to create Kube Job/Pod
     log_step "Step 4: Invoking to create Kube Job..."
 
-    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${deploy_path}" \
+    result=$(timed_curl -X POST "${FAAS_BASE_URL}/api/kube/${deploy_path#/}" \
         -H "Content-Type: application/json" \
         -d '{"test": "cascade"}' \
         --connect-timeout "$TIMEOUT_LONG")
