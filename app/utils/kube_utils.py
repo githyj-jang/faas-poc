@@ -1,16 +1,11 @@
 import asyncio
 import json
-import logging
-import os
-import shutil
-import subprocess
-import tempfile
-from pathlib import Path
-from typing import Any, Dict
-from kubernetes import client, config
 import time
 import uuid
-from app.models.lambda_model import LambdaStatusCode
+from pathlib import Path
+from typing import Dict
+
+from kubernetes import client, config
 
 RUNTIME_TEMPLATE_DIR = Path(__file__).parent.parent / "runtime"
 LOCAL_REGISTRY = "localhost:5000"  # 로컬 레지스트리 주소

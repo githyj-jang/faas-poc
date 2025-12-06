@@ -1,16 +1,18 @@
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request, Depends
+from sqlalchemy.orm import Session
 
-from app.models.callback_model import CallbackDeployResponse
+from app.core.database import get_db
+from app.core.logger import setup_logger
+from app.repositories.callback_repo import CallbackRepository
 from app.routers.deploy import get_callback_map
+from app.utils.broadcast_utils import broadcast
 from app.utils.docker_utils import run_callback_container
 from app.utils.kube_utils import run_lambda_job, get_job_pod_name, read_pod_logs
-from app.utils.broadcast_utils import broadcast
 
-from sqlalchemy.orm import Session
-from app.core.database import get_db
-from app.repositories.callback_repo import CallbackRepository
+# 로거 초기화
+logger = setup_logger(__name__)
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -49,20 +51,23 @@ async def execute_callback(path_name: str, request: Request, db: Session = Depen
     }
 
     session_id = str(uuid.uuid4())
-    print(f"Image: {image_name}, Session: {session_id}, Event: {unified_event}")
+    logger.info(f"Executing Kubernetes callback: {method} {path_name} (image: {image_name}, session: {session_id})")
+    logger.debug(f"Event data: {unified_event}")
 
     job_name = run_lambda_job(image_name=image_name, session_id=session_id, event_data=unified_event, env_vars=callback.env)
-    print(f"Started Job: {job_name}")
+    logger.info(f"Kubernetes job started: {job_name}")
 
     pod_name = get_job_pod_name(job_name)
 
     logs = read_pod_logs(pod_name)
-    print(f"[K8s Logs - {pod_name}] {logs}")
+    logger.debug(f"Pod {pod_name} logs: {logs}")
 
     try:
         import json
         result = json.loads(logs.replace("'", '"'))
+        logger.info(f"Kubernetes callback completed: {method} {path_name} (status: {result.get('statusCode', 'unknown')})")
     except Exception as e:
+        logger.error(f"Failed to parse Kubernetes pod logs for {path_name}: {str(e)}")
         result = {"error": "Invalid JSON in pod logs", "raw_logs": logs, "exception": str(e)}
 
     return result
@@ -102,13 +107,13 @@ async def execute_callback(path_name: str, request: Request, db: Session = Depen
     }
 
     session_id = str(uuid.uuid4())
-    print(
-        f"Image Name: {image_name}, Session ID: {session_id}, Event: {unified_event}"
-    )
+    logger.info(f"Executing Docker callback: {method} {path_name} (image: {image_name}, session: {session_id})")
+    logger.debug(f"Event data: {unified_event}")
 
     result = run_callback_container(
         image_name=image_name, session_id=session_id, event_data=unified_event, env_vars=callback.env
     )
+    logger.info(f"Docker callback completed: {method} {path_name} (status: {result.get('lambda_status_code', 'unknown')})")
     await broadcast(result)
 
     return result

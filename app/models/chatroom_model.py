@@ -2,9 +2,10 @@
 채팅방 관련 Pydantic 스키마
 """
 
-from pydantic import BaseModel
-from typing import Optional
 from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel
 
 
 class ChatRoomCreateRequest(BaseModel):

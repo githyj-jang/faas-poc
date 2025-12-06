@@ -2,9 +2,11 @@
 콜백 관련 Pydantic 스키마
 """
 
-from pydantic import BaseModel
-from typing import Optional, Dict, Any
 from datetime import datetime
+from typing import Optional, Dict, Any
+
+from pydantic import BaseModel
+
 
 class CallbackDeployRequest(BaseModel):
     """콜백 배포 요청"""
@@ -61,7 +63,7 @@ class CallbackResponse(BaseModel):
     class Config:
         from_attributes = True
 
-class CallbackAllResonse(BaseModel):
+class CallbackAllResponse(BaseModel):
     callback_id: int
     path: str
     method: str

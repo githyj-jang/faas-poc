@@ -8,9 +8,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
+from app.models.lambda_model import LambdaStatusCode
 from app.utils.broadcast_utils import broadcast
 from app.utils.kube_utils import build_kube_callback_image
-from app.models.lambda_model import LambdaStatusCode
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,8 @@ def run_callback_container(
     event_json = json.dumps(event_data)
 
     try:
-        logger.info("Running Docker Container")
-        
+        logger.info(f"Running Docker container: {image_name} (session: {session_id})")
+
         # 환경변수 준비
         docker_cmd = [
             "docker",
@@ -49,11 +49,10 @@ def run_callback_container(
         
         # 추가 환경변수 있으면 추가
         if env_vars:
+            logger.debug(f"Adding environment variables: {env_vars}")
             for key, value in env_vars.items():
                 docker_cmd.extend(["-e", f"{key}={value}"])
 
-        print(env_vars)
-        
         docker_cmd.append(image_name)
         
         completed = subprocess.Popen(
@@ -64,28 +63,31 @@ def run_callback_container(
         )
 
         stdout, stderr = completed.communicate(timeout=30)
-        logger.info(f"stdout: {stdout}")
-        logger.info(f"stderr: {stderr}")
+        logger.debug(f"Container stdout: {stdout}")
+        if stderr:
+            logger.debug(f"Container stderr: {stderr}")
 
         parsed = json.loads(stdout)
-        logger.info(f"Parsed result: {parsed}")
+        logger.info(f"Container execution successful: {image_name} (status: {parsed.get('lambda_status_code', 'unknown')})")
+        logger.debug(f"Full result: {parsed}")
 
         return parsed
     except subprocess.TimeoutExpired:
-        logger.error("Docker container execution timeout")
+        logger.error(f"Docker container execution timeout: {image_name} (exceeded 30s)")
         completed.terminate()
         return {
             "lambda_status_code": LambdaStatusCode.TIMEOUT.value,
             "body": "Process Time Out (30s)",
         }
     except json.JSONDecodeError as e:
-        logger.error(f"JSON decode error: {e}")
+        logger.error(f"JSON decode error for container {image_name}: {e}")
+        logger.debug(f"Invalid stdout: {stdout}")
         return {
             "lambda_status_code": LambdaStatusCode.JSON_PARSE_ERROR.value,
             "body": "Invalid JSON Response from Container",
         }
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        logger.error(f"Unexpected error running container {image_name}: {e}", exc_info=True)
         return {
             "lambda_status_code": LambdaStatusCode.LAMBDA_ERROR.value,
             "body": "Lambda execution error",
