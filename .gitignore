@@ -1,0 +1,116 @@
+# 환경 변수 및 설정
+.env
+.env.local
+.env.*.local
+
+# Python
+venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.py[cod]
+*$py.class
+*.so
+.Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 설치 및 빌드
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# IDE 및 에디터
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+.settings/
+
+# 테스트 및 커버리지
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# 데이터베이스
+*.db
+*.sqlite
+*.sqlite3
+database.db
+
+# 로그 파일
+*.log
+logs/
+*.log.*
+
+# Docker
+docker-compose.override.yml
+.dockerignore
+
+# 임시 파일
+*.tmp
+*.temp
+tmp/
+temp/
+*.bak
+*.backup
+
+# OS 파일
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE 임시 폴더
+.venv/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+
+# 로컬 테스트
+local_test.py
+test_local.py
+
+# 의존성 캐시
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 기타
+.env.example
+*.pid
+.cache/

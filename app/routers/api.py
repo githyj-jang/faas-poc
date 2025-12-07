@@ -1,5 +1,8 @@
 import uuid
+import json
+import hashlib
 
+import functools
 from fastapi import APIRouter, HTTPException, Request, Depends
 
 from app.models.callback_model import CallbackDeployResponse
@@ -14,8 +17,30 @@ from app.repositories.callback_repo import CallbackRepository
 
 router = APIRouter(prefix="/api", tags=["api"])
 
+# ========== 캐시 관리 ==========
+# 캐시 딕셔너리: {cache_key: result}
+_kube_callback_cache = {}
+_docker_callback_cache = {}
+
+def _generate_cache_key(path_name: str, method: str, query_params: dict, body_data: dict) -> str:
+    """캐시 키 생성"""
+    key_data = {
+        "path_name": path_name,
+        "method": method,
+        "query_params": sorted(query_params.items()),
+        "body_data": json.dumps(body_data, sort_keys=True, default=str)
+    }
+    key_str = json.dumps(key_data, sort_keys=True, default=str)
+    return hashlib.md5(key_str.encode()).hexdigest()
+
+def clear_api_caches():
+    """모든 API 캐시 클리어"""
+    _kube_callback_cache.clear()
+    _docker_callback_cache.clear()
+    print("[Cache] All API caches cleared")
+
 @router.api_route("/kube/{path_name}", methods=["GET", "POST", "PUT", "DELETE"])
-async def execute_callback(path_name: str, request: Request, db: Session = Depends(get_db)) -> dict:
+async def execute_kube_callback(path_name: str, request: Request, db: Session = Depends(get_db)) -> dict:
     method = request.method
     callback_map = get_callback_map()
 
@@ -41,6 +66,16 @@ async def execute_callback(path_name: str, request: Request, db: Session = Depen
         except Exception:
             body_data = {} # Body가 없거나 JSON이 아닌 경우
 
+    # 캐시 키 생성
+    cache_key = _generate_cache_key(path_name, method, query_params, body_data)
+    
+    # 캐시에서 확인
+    if cache_key in _kube_callback_cache:
+        print(f"[K8s Cache HIT] {path_name} {method}")
+        return _kube_callback_cache[cache_key]
+    
+    print(f"[K8s Cache MISS] {path_name} {method}")
+
     unified_event = {
         "httpMethod": request.method,           # "GET" or "POST"
         "queryStringParameters": query_params,  # 예: {"name": "foo"}
@@ -60,11 +95,13 @@ async def execute_callback(path_name: str, request: Request, db: Session = Depen
     print(f"[K8s Logs - {pod_name}] {logs}")
 
     try:
-        import json
         result = json.loads(logs.replace("'", '"'))
     except Exception as e:
         result = {"error": "Invalid JSON in pod logs", "raw_logs": logs, "exception": str(e)}
 
+    # 캐시에 저장
+    _kube_callback_cache[cache_key] = result
+    
     return result
 
 @router.api_route("/{path_name}", methods=["GET", "POST", "PUT", "DELETE"])
@@ -94,6 +131,16 @@ async def execute_callback(path_name: str, request: Request, db: Session = Depen
         except Exception:
             body_data = {} # Body가 없거나 JSON이 아닌 경우
 
+    # 캐시 키 생성
+    cache_key = _generate_cache_key(path_name, method, query_params, body_data)
+    
+    # 캐시에서 확인
+    if cache_key in _docker_callback_cache:
+        print(f"[Docker Cache HIT] {path_name} {method}")
+        return _docker_callback_cache[cache_key]
+    
+    print(f"[Docker Cache MISS] {path_name} {method}")
+
     unified_event = {
         "httpMethod": request.method,           # "GET" or "POST"
         "queryStringParameters": query_params,  # 예: {"name": "foo"}
@@ -111,4 +158,7 @@ async def execute_callback(path_name: str, request: Request, db: Session = Depen
     )
     await broadcast(result)
 
+    # 캐시에 저장
+    _docker_callback_cache[cache_key] = result
+    
     return result
