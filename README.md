@@ -1,3 +1,67 @@
+# 담당 업무: 테스트 코드 작성
+
+> **Note**: 이 저장소는 원본 저장소의 main 브랜치에 forTestScripts 브랜치를 merge한 저장소입니다.
+> 서버에 불필요한 파일 추가를 방지하기 위해 원본 main 브랜치에는 merge하지 않았습니다.
+
+## `/tests` 디렉토리 구조
+
+```
+tests/
+├── docker_health_check.sh      # Docker 환경 및 컨테이너 상태 점검
+├── faas_integration_test.sh    # FaaS 플랫폼 통합 테스트 (메인)
+├── load_test.sh                # 동시성 및 부하 테스트
+└── kube/                       # Kubernetes 환경 테스트
+    ├── kube_integration_test.sh      # K8s 통합 테스트
+    ├── kube_error_scenarios_test.sh  # K8s 에러 시나리오 테스트
+    └── kube_service_flow_test.sh     # K8s 서비스 플로우 테스트
+```
+
+## 테스트 스크립트 설명
+
+| 스크립트 | 설명 |
+|---------|------|
+| `docker_health_check.sh` | Docker Daemon 상태, 컨테이너 리소스 사용량, 이미지 관리, 네트워크 진단 |
+| `faas_integration_test.sh` | 서비스 플로우 테스트 (ChatRoom → Callback → Deploy → API 호출), API Contract 테스트, Cold Start 분석 |
+| `load_test.sh` | 동시 요청 테스트, 처리량 측정, 레이턴시 백분위 분석 |
+| `kube_integration_test.sh` | Kubernetes 클러스터 검증, Pod/Job 라이프사이클 테스트, 리소스 관리 검증 |
+| `kube_error_scenarios_test.sh` | OOMKilled, ImagePullBackOff, Job Timeout, RBAC Permission Denied, CrashLoopBackOff 시나리오 |
+| `kube_service_flow_test.sh` | Docker ↔ Kube 재배포 전환 테스트, ChatRoom 삭제 시 리소스 정리 검증 |
+
+## 테스트 실행 방법
+
+```bash
+# Docker 환경 점검
+./tests/docker_health_check.sh
+
+# FaaS 통합 테스트 실행
+./tests/faas_integration_test.sh
+
+# 부하 테스트 (기본: 10 동시 사용자, 100 요청)
+./tests/load_test.sh <endpoint_path>
+
+# Kubernetes 통합 테스트
+./tests/kube/kube_integration_test.sh
+
+# Kubernetes 에러 시나리오 테스트
+./tests/kube/kube_error_scenarios_test.sh
+
+# Kubernetes 서비스 플로우 테스트
+./tests/kube/kube_service_flow_test.sh
+```
+
+## 환경 변수
+
+```bash
+FAAS_BASE_URL=http://localhost:8000   # FaaS API 서버 주소
+KUBE_NAMESPACE=default                 # Kubernetes 네임스페이스
+CONCURRENT_USERS=10                    # 동시 사용자 수 (부하 테스트)
+TOTAL_REQUESTS=100                     # 총 요청 수 (부하 테스트)
+```
+
+---
+
+
+
 # FaaS Gateway
 
 Function as a Service Gateway API 프로젝트
