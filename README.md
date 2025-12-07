@@ -1,4 +1,8 @@
-# 담당 업무: 테스트 코드 작성
+# FaaS Gateway
+
+Function as a Service Gateway API 프로젝트
+
+## 담당 업무: 테스트 코드 작성
 
 > **Note**: 이 저장소는 원본 저장소의 main 브랜치에 forTestScripts 브랜치를 merge한 저장소입니다.
 > 서버에 불필요한 파일 추가를 방지하기 위해 원본 main 브랜치에는 merge하지 않았습니다.
@@ -59,12 +63,6 @@ TOTAL_REQUESTS=100                     # 총 요청 수 (부하 테스트)
 ```
 
 ---
-
-
-
-# FaaS Gateway
-
-Function as a Service Gateway API 프로젝트
 
 ## 📁 프로젝트 구조
 
